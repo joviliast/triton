@@ -1308,6 +1308,37 @@ def mfma_supported(M, N, K, allow_tf32, ret_scalar_ty, target) -> bool:
         return False
     return True
 
+def mfma_supported_granularity(m, n, k) -> bool:
+    # todo make this gran_type matrix element type sensitive
+    for gran_type in [(32, 8), (16, 16)]:
+        granularity_mn, granularity_k = gran_type
+
+        if m % granularity_mn != 0 or n % granularity_mn != 0:
+            continue
+        if k % granularity_k != 0:
+            continue
+        return True
+    return False
+
+def wmma_supported(M, N, K, lhs_dtype, rhs_dtype, target) -> bool:
+    hw_support_wmma = "gfx11" in target["gfx_arch"]
+    if not hw_support_wmma:
+        return False
+    # Should we convert operands if it is possible?
+    # TODO: uint4 is also supported
+    if lhs_dtype.scalar != rhs_dtype.scalar:
+        return False
+
+    if not lhs_dtype.scalar.is_uint8() and \
+       not lhs_dtype.scalar.is_bf16() and \
+       not lhs_dtype.scalar.is_fp16():
+       return False
+
+    # TODO: support some kind of padding
+    if M % 16 != 0 or N % 16 != 0 or K % 16 != 0:
+        return False
+    return True
+
 def dot(lhs: tl.tensor,
         rhs: tl.tensor,
         acc: tl.tensor,
@@ -1400,6 +1431,33 @@ def dot(lhs: tl.tensor,
     M = lhs.type.shape[0]
     N = rhs.type.shape[1]
 
+    if is_hip() and                                                                    \
+       wmma_supported(M, N, lhs.type.shape[1], lhs.type, rhs.type, builder.target) and \
+       ret_scalar_ty.primitive_bitwidth <= 32:
+        max_num_imprecise_acc = 0
+        if lhs.type.scalar.is_int():
+            ret_dot_scalar_ty = tl.int32
+            _0 = builder.create_splat(builder.get_int32(0), [M, N])
+        elif lhs.type.scalar.is_fp16:
+            if ret_scalar_ty.is_fp16:
+                ret_dot_scalar_ty = tl.float16
+                _0 = builder.create_splat(builder.get_fp16(0), [M, N])
+            else:
+                ret_dot_scalar_ty = tl.float32
+                _0 = builder.create_splat(builder.get_fp32(0), [M, N])
+        elif lhs.type.scalar.is_bf16:
+            print(lhs.type.scalar)
+            if ret_scalar_ty.is_bf16:
+                ret_dot_scalar_ty = tl.bfloat16
+                _0 = builder.create_splat(builder.get_bf16(0), [M, N])
+            else:
+                ret_dot_scalar_ty = tl.float32
+                _0 = builder.create_splat(builder.get_fp32(0), [M, N])
+
+        ret_ty = tl.block_type(ret_dot_scalar_ty, [M, N])
+        ret = tl.tensor(builder.create_dot(lhs.handle, rhs.handle, _0, allow_tf32, max_num_imprecise_acc),
+                        ret_ty)
+        return cast(ret, ret_scalar_ty, builder)
     # Cast operands of types f16 and i8 for configurations where FMA only supported.
     if is_hip() and not mfma_supported(M, N, lhs.type.shape[1], allow_tf32, ret_scalar_ty, builder.target):
         # max_num_imprecise_acc does not yet apply to hip
@@ -1418,7 +1476,9 @@ def dot(lhs: tl.tensor,
         ret = tl.tensor(builder.create_dot(lhs.handle, rhs.handle, _0, allow_tf32, max_num_imprecise_acc),
                         ret_ty)
         return cast(ret, ret_scalar_ty, builder)
-    if is_hip() and mfma_supported(M, N, lhs.type.shape[1], allow_tf32, ret_scalar_ty, builder.target) and ret_scalar_ty.primitive_bitwidth <= 32:
+    if is_hip() and                                                                           \
+       mfma_supported(M, N, lhs.type.shape[1], allow_tf32, ret_scalar_ty, builder.target) and \
+       ret_scalar_ty.primitive_bitwidth <= 32:
         # max_num_imprecise_acc does not yet apply to hip
         if is_hip():
             max_num_imprecise_acc = 0
@@ -1443,13 +1503,11 @@ def dot(lhs: tl.tensor,
     else:
         acc_handle = acc.handle
         assert acc.type == ret_ty
-
     # max_num_imprecise_acc only applies to fp8 -> fp32 dot on sm_90
     if not (_is_cuda(builder.target) and builder.target.capability == 90 and lhs.dtype.is_fp8() and rhs.dtype.is_fp8() and ret_scalar_ty.is_fp32()):
         max_num_imprecise_acc = 0
     if max_num_imprecise_acc is None:
         max_num_imprecise_acc = 2**30
-
     return tl.tensor(builder.create_dot(lhs.handle, rhs.handle, acc_handle, allow_tf32, max_num_imprecise_acc),
                      ret_ty)
 
