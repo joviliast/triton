@@ -915,6 +915,10 @@ private:
                                      .dyn_cast_or_null<MfmaEncodingAttr>()) {
       res = lowerSharedToDotOperandMFMA(op, adaptor, rewriter, mfmaLayout,
                                         dotOperandLayout, isOuter);
+    /*} else if (auto wmmaLayout = dotOperandLayout.getParent()
+                                     .dyn_cast_or_null<WmmaEncodingAttr>()) {
+      res = lowerSharedToDotOperandWMMA(op, adaptor, rewriter, mfmaLayout,
+                                        dotOperandLayout, isOuter);*/
 #endif
     } else if (auto blockedLayout =
                    dotOperandLayout.getParent()
