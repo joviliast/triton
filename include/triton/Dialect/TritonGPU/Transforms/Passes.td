@@ -104,7 +104,10 @@ def TritonAMDGPUAccelerateMatmul : Pass<"tritonamdgpu-accelerate-matmul", "mlir:
            "device matrix core version">,
     Option<"matrixInstructionSize", "matrix-instruction-size",
            "int32_t", /*default*/"0",
-           "enforce matrix instruction MN size">
+           "enforce matrix instruction MN size">,
+    Option<"supportWMMA", "support-wmma",
+           "bool", /*default*/"false",
+           "device supports wmma instructions">
   ];
 }
 

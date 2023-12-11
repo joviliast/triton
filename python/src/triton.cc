@@ -1859,9 +1859,9 @@ void init_triton_ir(py::module &&m) {
                  mlir::createTritonGPUAccelerateMatmulPass(computeCapability));
            })
       .def("add_tritonamdgpu_accelerate_matmul_pass",
-           [](mlir::PassManager &self, int tensorCoreVersion, int instrSize) {
+           [](mlir::PassManager &self, int tensorCoreVersion, int instrSize, bool supportWMMA) {
              self.addPass(mlir::createTritonAMDGPUAccelerateMatmulPass(
-                 tensorCoreVersion, instrSize));
+                 tensorCoreVersion, instrSize, supportWMMA));
            })
       .def("add_tritongpu_optimize_dot_operands_pass",
            [](mlir::PassManager &self) {

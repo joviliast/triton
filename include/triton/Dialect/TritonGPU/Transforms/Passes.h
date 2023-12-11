@@ -18,7 +18,8 @@ createTritonGPUAccelerateMatmulPass(int computeCapability = 80);
 
 std::unique_ptr<Pass>
 createTritonAMDGPUAccelerateMatmulPass(int matrixCoreVersion = 0,
-                                       int matrixInstructionSize = 0);
+                                       int matrixInstructionSize = 0,
+                                       bool supportWMMA = false);
 
 std::unique_ptr<Pass> createTritonGPUPrefetchPass();
 

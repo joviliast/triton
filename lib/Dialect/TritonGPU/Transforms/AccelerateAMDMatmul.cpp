@@ -21,7 +21,8 @@ using ttg::MfmaEncodingAttr;
 using ttg::SliceEncodingAttr;
 
 SmallVector<unsigned, 2>
-warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
+warpsPerTile(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps,
+             SmallVector<int64_t, 2> shapePerWarp) {
   // TODO: needs to be updated with appropriate shapePerWarp etc.
   auto filter = [&dotOp](Operation *op) {
     return op->getParentRegion() == dotOp->getParentRegion();
@@ -38,18 +39,15 @@ warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
 
   SmallVector<int64_t, 2> tensorShape = {shape[0], shape[1]};
   SmallVector<unsigned, 2> ret = {1, 1};
-  SmallVector<int64_t, 2> shapePerWarp = {32, 32};
-  bool changed = false;
 
   do {
-    changed = false;
     if (ret[0] * ret[1] >= numWarps)
       break;
     if (tensorShape[0] / (shapePerWarp[0] * 2) / ret[0] >=
         tensorShape[1] / shapePerWarp[1] / ret[1]) {
-      if (ret[0] < tensorShape[0] / shapePerWarp[0]) {
+      if (ret[0] < tensorShape[0] / shapePerWarp[0])
         ret[0] *= 2;
-      } else
+      else
         ret[1] *= 2;
     } else {
       ret[1] *= 2;
@@ -63,13 +61,23 @@ warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
   return ret;
 }
 
+SmallVector<unsigned, 2>
+warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
+  return warpsPerTile(dotOp, shape, numWarps, {32, 32});
+}
+
+SmallVector<unsigned, 2>
+warpsPerTileWMMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
+  return warpsPerTile(dotOp, shape, numWarps, {16, 16});
+}
+
 class BlockedToMFMA : public mlir::RewritePattern {
   int mfmaVersion;
   int enforcedNonKDim;
 
 public:
   BlockedToMFMA(mlir::MLIRContext *context, int mfmaVersion, int nonKDim)
-      : mlir::RewritePattern(tt::DotOp::getOperationName(), 2, context),
+      : mlir::RewritePattern(tt::DotOp::getOperationName(), 3, context),
         mfmaVersion(mfmaVersion), enforcedNonKDim(nonKDim) {}
 
   bool isChainDot(tt::DotOp &dotOp) const {
@@ -281,6 +289,82 @@ public:
   }
 };
 
+class BlockedToWMMA : public mlir::RewritePattern {
+public:
+  BlockedToWMMA(mlir::MLIRContext *context)
+      : mlir::RewritePattern(tt::DotOp::getOperationName(), 2, context) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::Operation *op,
+                  mlir::PatternRewriter &rewriter) const override {
+  auto dotOp = cast<tt::DotOp>(op);
+
+  auto oldRetType = dotOp.getResult().getType().cast<RankedTensorType>();
+    if (!oldRetType.getEncoding() ||
+        !oldRetType.getEncoding().isa<ttg::BlockedEncodingAttr>())
+      return failure();
+
+    if (!supportWMMA(dotOp))
+      return failure();
+
+    // get WMMA encoding for the given number of warps
+    auto retShape = oldRetType.getShape();
+    auto mod = op->getParentOfType<mlir::ModuleOp>();
+    int numWarps = ttg::TritonGPUDialect::getNumWarps(mod);
+
+    // operands
+    Value a = dotOp.getA();
+    Value b = dotOp.getB();
+    auto oldAType = a.getType().cast<RankedTensorType>();
+    auto oldBType = b.getType().cast<RankedTensorType>();
+    auto ctx = oldAType.getContext();
+
+    ttg::WmmaEncodingAttr wmmaEnc;
+
+    int nonKDim = 16;
+    int kDim = 16;
+
+    auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
+    wmmaEnc = ttg::WmmaEncodingAttr::get(oldRetType.getContext(), warpsPerTile);
+    auto newRetType =
+        RankedTensorType::get(retShape, oldRetType.getElementType(), wmmaEnc);
+
+    // convert accumulator
+    auto oldAcc = dotOp.getOperand(2);
+    auto newAcc = rewriter.create<ttg::ConvertLayoutOp>(oldAcc.getLoc(),
+                                                        newRetType, oldAcc);
+    auto oldAOrder = oldAType.getEncoding()
+                         .cast<ttg::DotOperandEncodingAttr>()
+                         .getParent()
+                         .cast<ttg::BlockedEncodingAttr>()
+                         .getOrder();
+    auto oldBOrder = oldBType.getEncoding()
+                         .cast<ttg::DotOperandEncodingAttr>()
+                         .getParent()
+                         .cast<ttg::BlockedEncodingAttr>()
+                         .getOrder();
+
+    // kWidth is a number of consecutive elements per one instruction per one
+    // thread
+    auto kWidth = kDim / 2;
+
+    auto newAType = RankedTensorType::get(
+        oldAType.getShape(), oldAType.getElementType(),
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kWidth));
+    auto newBType = RankedTensorType::get(
+        oldBType.getShape(), oldBType.getElementType(),
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kWidth));
+    a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
+    b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
+    auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newRetType, a, b,
+                                             newAcc, dotOp.getAllowTF32(),
+					     dotOp.getMaxNumImpreciseAcc());
+
+    rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(op, oldRetType,
+                                                      newDot.getResult());
+    return success();
+  }
+};
 } // namespace
 
 #define GEN_PASS_CLASSES
@@ -292,9 +376,11 @@ class TritonAMDGPUAccelerateMatmulPass
 public:
   TritonAMDGPUAccelerateMatmulPass() = default;
   TritonAMDGPUAccelerateMatmulPass(int matrixCoreVersion,
-                                   int matrixInstructionSize) {
+                                   int matrixInstructionSize,
+                                   bool supportWMMA) {
     this->matrixCoreVersion = matrixCoreVersion;
     this->matrixInstructionSize = matrixInstructionSize;
+    this->supportWMMA = supportWMMA;
   }
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -302,9 +388,12 @@ public:
 
     mlir::RewritePatternSet patterns(context);
     if (matrixCoreVersion == 1 || matrixCoreVersion == 2 ||
-        matrixCoreVersion == 3)
+        matrixCoreVersion == 3) {
       patterns.add<::BlockedToMFMA>(context, matrixCoreVersion,
                                     matrixInstructionSize);
+    } else if (supportWMMA) {
+      patterns.add<::BlockedToWMMA>(context);
+    }
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
     }
@@ -313,7 +402,8 @@ public:
 
 std::unique_ptr<Pass>
 mlir::createTritonAMDGPUAccelerateMatmulPass(int matrixCoreVersion,
-                                             int matrixInstructionSize) {
+                                             int matrixInstructionSize,
+                                             bool supportWMMA) {
   return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
-      matrixCoreVersion, matrixInstructionSize);
+      matrixCoreVersion, matrixInstructionSize, supportWMMA);
 }

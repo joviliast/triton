@@ -122,7 +122,8 @@ def optimize_ttgir(mod, num_stages, num_warps, num_ctas, target,
     if is_hip():
         matrix_core_version = target["matrix_core_version"]
         matrix_inst_size = matrix_inst_type
-        pm.add_tritonamdgpu_accelerate_matmul_pass(matrix_core_version, matrix_inst_size)
+        hw_support_wmma = "gfx11" in target["gfx_arch"]
+        pm.add_tritonamdgpu_accelerate_matmul_pass(matrix_core_version, matrix_inst_size, hw_support_wmma)
     pm.add_tritongpu_remove_layout_conversions_pass()
     if optimize_epilogue:
         pm.add_tritongpu_optimize_epilogue_pass()
