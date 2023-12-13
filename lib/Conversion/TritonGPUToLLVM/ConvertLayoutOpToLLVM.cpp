@@ -56,6 +56,14 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                     const SharedMemoryObject &smemObj,
                     TritonGPUToLLVMTypeConverter *typeConverter, Value thread);
 } // namespace SharedToDotOperandMFMA
+
+namespace SharedToDotOperandWMMA {
+Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
+                    Location loc, Value tensor,
+                    DotOperandEncodingAttr bEncoding,
+                    const SharedMemoryObject &smemObj,
+                    TritonGPUToLLVMTypeConverter *typeConverter, Value thread);
+} // namespace SharedToDotOperandMFMA
 #endif
 
 namespace SharedToDotOperandFMA {
@@ -915,10 +923,10 @@ private:
                                      .dyn_cast_or_null<MfmaEncodingAttr>()) {
       res = lowerSharedToDotOperandMFMA(op, adaptor, rewriter, mfmaLayout,
                                         dotOperandLayout, isOuter);
-    /*} else if (auto wmmaLayout = dotOperandLayout.getParent()
+    } else if (auto wmmaLayout = dotOperandLayout.getParent()
                                      .dyn_cast_or_null<WmmaEncodingAttr>()) {
       res = lowerSharedToDotOperandWMMA(op, adaptor, rewriter, mfmaLayout,
-                                        dotOperandLayout, isOuter);*/
+                                        dotOperandLayout, isOuter);
 #endif
     } else if (auto blockedLayout =
                    dotOperandLayout.getParent()
@@ -1079,6 +1087,29 @@ private:
 
     if (!isOuter) {
       res = SharedToDotOperandMFMA::convertLayout(
+          dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
+          smemObj, getTypeConverter(), tid_val());
+    } else {
+      assert(false && "unsupported layout found");
+    }
+    return res;
+  }
+
+  // shared -> dot_operand if the result layout is mma
+  Value lowerSharedToDotOperandWMMA(
+      triton::gpu::ConvertLayoutOp op, OpAdaptor adaptor,
+      ConversionPatternRewriter &rewriter, const MfmaEncodingAttr &mfmaLayout,
+      const DotOperandEncodingAttr &dotOperandLayout, bool isOuter) const {
+    auto loc = op.getLoc();
+    Value src = op.getSrc();
+    Value dst = op.getResult();
+
+    auto smemObj =
+        getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(), rewriter);
+    Value res;
+
+    if (!isOuter) {
+      res = SharedToDotOperandWMMA::convertLayout(
           dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
           smemObj, getTypeConverter(), tid_val());
     } else {
