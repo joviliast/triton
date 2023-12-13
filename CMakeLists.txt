@@ -64,7 +64,15 @@ include_directories(${PYBIND11_INCLUDE_DIR})
 set(CMAKE_CXX_FLAGS "${CMAKE_C_FLAGS} -D__STDC_FORMAT_MACROS  -fPIC -std=gnu++17 -fvisibility=hidden -fvisibility-inlines-hidden")
 
 if (TRITON_USE_ROCM)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_ROCM -Wno-unused-result -Wno-attributes -DTRITONGPU_DEFAULT_WARPSIZE=64")
+    # Provide `Wavefront Size` of the first applicable agent
+    execute_process(
+      COMMAND rocminfo
+      COMMAND tr -d " "
+      COMMAND grep -Po "(?<=WavefrontSize:)[0-9]+"
+      COMMAND tr -d \n
+      OUTPUT_VARIABLE HW_WARPSIZE
+    )
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_ROCM -Wno-unused-result -Wno-attributes -DTRITONGPU_DEFAULT_WARPSIZE=${HW_WARPSIZE}")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTRITONGPU_DEFAULT_WARPSIZE=32")
 endif()
