@@ -423,11 +423,11 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   auto order = sharedLayout.getOrder();
 
   auto elemTy = aTensorTy.getElementType();
-  auto elemsPerInstr = encoding.getMFMAElemsPerInstr();
+  auto elemsPerInstr = encoding.getElemsPerMatrixCoreInstr();
   auto mfmaInstrNonK = elemsPerInstr[nonKDimIdx];
   auto mfmaInstrK = elemsPerInstr[kDimIdx];
 
-  auto numReps = encoding.getMFMARep(shape);
+  auto numReps = encoding.getMatrixCoreInstrRep(shape);
   auto numRepNonK = numReps[nonKDimIdx];
   auto numRepK = numReps[kDimIdx];
 
