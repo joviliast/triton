@@ -30,6 +30,9 @@ LogicalResult convertMMA16816(triton::DotOp op, triton::DotOp::Adaptor adaptor,
 LogicalResult convertMFMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                           TritonGPUToLLVMTypeConverter *typeConverter,
                           ConversionPatternRewriter &rewriter);
+LogicalResult convertWMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
+                          TritonGPUToLLVMTypeConverter *typeConverter,
+                          ConversionPatternRewriter &rewriter);
 #endif
 LogicalResult convertWGMMA(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                            TritonGPUToLLVMTypeConverter *typeConverter,
@@ -85,9 +88,7 @@ struct DotOpConversion : public ConvertTritonGPUOpToLLVMPattern<triton::DotOp> {
         return convertMFMA(op, adaptor, getTypeConverter(), rewriter);
       }
       if (dEncoding.isa<WmmaEncodingAttr>() && supportWMMA(op)) {
-        llvm::report_fatal_error(
-          "WMMA dot operations are not supported yet.");
-        //return convertWMMA(op, adaptor, getTypeConverter(), rewriter);
+        return convertWMMA(op, adaptor, getTypeConverter(), rewriter);
       }
     }
 #endif

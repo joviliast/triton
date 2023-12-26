@@ -425,6 +425,7 @@ struct ConvertTritonGPUToLLVM
     decomposeMmaToDotOperand(mod, numWarps, threadsPerWarp, numCTAs);
 #ifdef USE_ROCM
     decomposeMfmaToDotOperand(mod, numWarps, threadsPerWarp, numCTAs);
+    decomposeWmmaToDotOperand(mod, numWarps, threadsPerWarp, numCTAs);
     reduceCvtOpLDSUsage(mod);
 #endif
     decomposeBlockedToDotOperand(mod);
@@ -728,6 +729,33 @@ private:
     });
   }
 
+  void decomposeWmmaToDotOperand(ModuleOp mod, int numWarps, int threadsPerWarp,
+                                 int numCTAs) const {
+    mod.walk([&](triton::gpu::ConvertLayoutOp cvtOp) -> void {
+      OpBuilder builder(cvtOp);
+      auto srcType = cvtOp.getOperand().getType().cast<RankedTensorType>();
+      auto dstType = cvtOp.getType().cast<RankedTensorType>();
+      auto srcWmma =
+          srcType.getEncoding().dyn_cast<triton::gpu::WmmaEncodingAttr>();
+      auto dstDotOp =
+          dstType.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
+      if (srcWmma && dstDotOp) {
+        assert(false);
+        auto tmpType = RankedTensorType::get(
+            dstType.getShape(), dstType.getElementType(),
+            triton::gpu::BlockedEncodingAttr::get(
+                mod.getContext(), srcType.getShape(), getSizePerThread(srcWmma),
+                getOrder(srcWmma), numWarps, threadsPerWarp, numCTAs));
+        auto tmp = builder.create<triton::gpu::ConvertLayoutOp>(
+            cvtOp.getLoc(), tmpType, cvtOp.getOperand());
+        auto newConvert = builder.create<triton::gpu::ConvertLayoutOp>(
+            cvtOp.getLoc(), dstType, tmp);
+        cvtOp.replaceAllUsesWith(newConvert.getResult());
+        cvtOp.erase();
+      }
+    });
+  }
+
   int getCvtOpLDSUsage(triton::gpu::ConvertLayoutOp &cvtOp) const {
     unsigned inVec = 0;
     unsigned outVec = 0;
@@ -813,12 +841,14 @@ private:
       auto srcType = cvtOp.getOperand().getType().cast<RankedTensorType>();
       auto dstType = cvtOp.getType().cast<RankedTensorType>();
 
-      auto srcMfma =
-          srcType.getEncoding().dyn_cast<triton::gpu::MfmaEncodingAttr>();
+      auto srcEnc = srcType.getEncoding();
       auto dstBlocked =
           dstType.getEncoding().dyn_cast<triton::gpu::BlockedEncodingAttr>();
 
-      if (!srcMfma || !dstBlocked) {
+      if (!srcEnc.isa<
+              triton::gpu::
+                  MfmaEncodingAttr /*, triton::gpu::WmmaEncodingAttr*/>() ||
+          !dstBlocked) {
         return;
       }
 
@@ -827,9 +857,7 @@ private:
         return;
       }
 
-      unsigned numWarps =
-          srcMfma.getWarpsPerCTA()[0] * srcMfma.getWarpsPerCTA()[1];
-
+      unsigned numWarps = triton::gpu::getNumWarpsPerCTA(srcEnc);
       triton::gpu::ConvertLayoutOp tmpCvt;
       triton::gpu::ConvertLayoutOp newEpilogueCvt;
 
@@ -1065,6 +1093,29 @@ private:
                          .cast<RankedTensorType>()
                          .getEncoding()
                          .dyn_cast<MfmaEncodingAttr>()) {
+        Type BElType =
+            dotOp.getB().getType().cast<RankedTensorType>().getElementType();
+
+        auto maxBitWidth = std::max(AElType.getIntOrFloatBitWidth(),
+                                    BElType.getIntOrFloatBitWidth());
+
+        // TODO check mfma tensor core version compatibility
+        if (maxBitWidth == 8)
+          return;
+
+        if (AElType == BElType)
+          return;
+
+        if (maxBitWidth < 16)
+          promoteType = builder.getF16Type();
+        else if (maxBitWidth <= 32)
+          promoteType = builder.getF32Type();
+      } else if (WmmaEncodingAttr wmmaLayout =
+                     D.getType()
+                         .cast<RankedTensorType>()
+                         .getEncoding()
+                         .dyn_cast<WmmaEncodingAttr>()) {
+        // assert(false);
         Type BElType =
             dotOp.getB().getType().cast<RankedTensorType>().getElementType();
 

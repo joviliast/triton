@@ -447,7 +447,7 @@ def compile(fn, **kwargs):
         _device_backend = get_backend(device_type)
         assert _device_backend
         target = _device_backend.get_architecture_descriptor(**kwargs)
-    warp_size = CUDA_DEFAULT_WARP_SIZE if is_cuda else target["warp_size"]
+    warp_size = CUDA_DEFAULT_WARP_SIZE if is_cuda else 32
     # build compilation stages
     stages = dict()
     stages["ast"] = (lambda path: fn, None)
@@ -468,7 +468,7 @@ def compile(fn, **kwargs):
 
         other = {}
         other["context"] = context
-        other["warp_size"] = warp_size
+        other["warp_size"] = 32
         other["cluster_info"] = cluster_info 
         other["enable_warp_specialization"] = enable_warp_specialization
         other["enable_persistent"] = enable_persistent
@@ -556,7 +556,7 @@ def compile(fn, **kwargs):
     else:
         metadata = {
             "num_warps": num_warps,
-            "warp_size": warp_size,
+            "warp_size": 32,
             "num_ctas": num_ctas,
             "num_stages": num_stages,
             "waves_per_eu": waves_per_eu,
@@ -690,7 +690,7 @@ class CompiledKernel:
         # initialize metadata
         self.shared = metadata["shared"]
         self.num_warps = metadata["num_warps"]
-        self.warp_size = metadata["warp_size"]
+        self.warp_size = 32
         self.num_ctas = metadata["num_ctas"]
         self.num_stages = metadata["num_stages"]
         self.waves_per_eu = metadata["waves_per_eu"]

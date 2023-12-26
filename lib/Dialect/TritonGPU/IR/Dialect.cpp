@@ -524,8 +524,12 @@ SmallVector<unsigned> getOrder(Attribute layout) {
   if (auto blockedLayout = layout.dyn_cast<BlockedEncodingAttr>()) {
     return SmallVector<unsigned>(blockedLayout.getOrder().begin(),
                                  blockedLayout.getOrder().end());
-  } else if (layout.isa<MmaEncodingAttr, MfmaEncodingAttr, WmmaEncodingAttr, DotOperandEncodingAttr>()) {
+  } else if (layout.isa<MmaEncodingAttr, MfmaEncodingAttr, DotOperandEncodingAttr>()) {
     return {1, 0};
+  } else if (layout.isa<WmmaEncodingAttr>()) {
+    // TODO: fix me. Should be row major. Need to fix upstream vector size calc.
+    // see getScratchConfigForCvtLayout.
+    return {0, 1};
   } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     SmallVector<unsigned> parentOrder = getOrder(sliceLayout.getParent());
     unsigned dim = sliceLayout.getDim();
@@ -1150,9 +1154,9 @@ DotOperandEncodingAttr::getMatrixCoreInstrRep(ArrayRef<int64_t> operandShape) co
   auto operandTileShape = getElemsPerMatrixCoreInstr();
   auto warpsPerCTA = getWarpsPerCTA(getParent());
   if (getOpIdx() == 0)
-    return {
-        std::max<int64_t>(1, operandShape[0] / (operandTileShape[0] * warpsPerCTA[0])),
-        std::max<int64_t>(1, operandShape[1] / operandTileShape[1])};
+    return {std::max<int64_t>(1, operandShape[0] /
+                                     (operandTileShape[0] * warpsPerCTA[0])),
+            std::max<int64_t>(1, operandShape[1] / operandTileShape[1])};
   else {
     assert(getOpIdx() == 1);
     return {std::max<int64_t>(1, operandShape[0] / operandTileShape[0]),

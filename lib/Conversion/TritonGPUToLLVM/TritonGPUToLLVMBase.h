@@ -31,6 +31,7 @@ using ::mlir::triton::gpu::BlockedEncodingAttr;
 using ::mlir::triton::gpu::CTALayoutAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::MfmaEncodingAttr;
+using ::mlir::triton::gpu::WmmaEncodingAttr;
 using ::mlir::triton::gpu::MmaEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
 using ::mlir::triton::gpu::TMAMetadataTy;
@@ -721,6 +722,8 @@ public:
                                                           mmaLayout, type);
       } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
         result = emitBaseIndexForMfmaLayout(loc, rewriter, mfmaLayout, type);
+      } else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+        result = emitBaseIndexForWmmaLayout(loc, rewriter, wmmaLayout, type);
       } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
         auto parentLayout = sliceLayout.getParent();
         auto parentShape = sliceLayout.paddedShape(type.getShape());
@@ -763,6 +766,9 @@ public:
     if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
       return emitOffsetForMfmaLayout(mfmaLayout, type);
     }
+    if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+      return emitOffsetForWmmaLayout(wmmaLayout, type);
+    }
     if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>())
       return emitOffsetForSliceLayout(sliceLayout, type);
     llvm_unreachable("unsupported emitOffsetForLayout");
@@ -801,6 +807,19 @@ public:
       }
     }
   }
+
+  void emitWmmaOffsetForCTA(const WmmaEncodingAttr &wmmaLayout,
+                            SmallVector<SmallVector<unsigned>> &offsets,
+                            unsigned ctaOffsetX, unsigned ctaOffsetY) const {
+    const unsigned elemsPerThreadPerGroup = 8;
+    auto warpSize = getWarpSize(wmmaLayout);
+    assert(warpSize == 32);
+    auto shapePerCta = getShapePerCTATile(wmmaLayout);
+    for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
+      offsets.push_back({ctaOffsetX * shapePerCta[0],
+                         ctaOffsetY * shapePerCta[1] + 2 * elem});
+    }
+  }
 #endif
 
   // -----------------------------------------------------------------------
@@ -828,6 +847,8 @@ public:
       } else if (auto mfma = layout.dyn_cast<MfmaEncodingAttr>()) {
         result = 
             emitIndicesForDistributedLayout(loc, b, mfma, type, withCTAOffset);
+      }else if (layout.isa<WmmaEncodingAttr>()) {
+            assert(false);
       } else if (auto slice = layout.dyn_cast<SliceEncodingAttr>()) {
         result =
             emitIndicesForDistributedLayout(loc, b, slice, type, withCTAOffset);
@@ -1253,6 +1274,58 @@ private:
     for (unsigned i = 0; i < numWarpsPerDim[0]; ++i) {
       for (unsigned j = 0; j < numWarpsPerDim[1]; ++j) {
         emitMfmaOffsetForCTA(mfmaLayout, offsets, i, j);
+      }
+    }
+    return offsets;
+  }
+
+    SmallVector<Value>
+  emitBaseIndexForWmmaLayout(Location loc, ConversionPatternRewriter &rewriter,
+                             const WmmaEncodingAttr &wmmaLayout,
+                             RankedTensorType type) const {
+    auto shape = type.getShape();
+    auto _warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+    assert(_warpsPerCTA.size() == 2);
+    SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
+                                      i32_val(_warpsPerCTA[1])};
+    auto mnkDim = WmmaEncodingAttr::getMNKDimPerWMMAInstr();
+
+    Value threadId = getThreadId(rewriter, loc);
+    Value warpSize = i32_val(triton::gpu::getWarpSize(wmmaLayout));
+    Value laneId = urem(threadId, i32_val(triton::gpu::getWarpSize(wmmaLayout) / 2));
+
+    Value warpId = udiv(threadId, warpSize);
+    Value warpId0 =
+        urem(urem(warpId, warpsPerCTA[0]), i32_val(shape[0] / mnkDim[0]));
+    Value warpId1 = urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]),
+                         i32_val(shape[1] / mnkDim[2]));
+
+    Value offWarp0 = mul(warpId0, i32_val(mnkDim[0]));
+    Value offWarp1 = mul(warpId1, i32_val(mnkDim[1]));
+
+    return {add(laneId, offWarp0),
+            add(udiv(threadId, i32_val(mnkDim[2])), offWarp1)};
+  }
+
+  SmallVector<SmallVector<unsigned>>
+  emitOffsetForWmmaLayout(const WmmaEncodingAttr &wmmaLayout,
+                          RankedTensorType type) const { // same
+    auto tensorShape = type.getShape();
+    SmallVector<SmallVector<unsigned>> offsets;
+    auto shapePerCTA = getShapePerCTA(wmmaLayout, tensorShape);
+    auto warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+
+    SmallVector<unsigned> numWarpsPerDim(2);
+    auto mnkDim = WmmaEncodingAttr::getMNKDimPerWMMAInstr();
+    for (unsigned d = 0; d < 2; ++d) {
+      unsigned inPerCTA = std::min<unsigned>(tensorShape[d], shapePerCTA[d]);
+      unsigned inPerWarp = ceil<unsigned>(inPerCTA, warpsPerCTA[d]);
+      numWarpsPerDim[d] = ceil<unsigned>(inPerWarp, mnkDim[d]);
+    }
+
+    for (unsigned i = 0; i < numWarpsPerDim[0]; ++i) {
+      for (unsigned j = 0; j < numWarpsPerDim[1]; ++j) {
+        emitWmmaOffsetForCTA(wmmaLayout, offsets, i, j);
       }
     }
     return offsets;

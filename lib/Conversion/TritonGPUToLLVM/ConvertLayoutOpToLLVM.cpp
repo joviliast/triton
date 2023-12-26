@@ -56,6 +56,13 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
                     const SharedMemoryObject &smemObj,
                     TritonGPUToLLVMTypeConverter *typeConverter, Value thread);
 } // namespace SharedToDotOperandMFMA
+namespace SharedToDotOperandWMMA {
+Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
+                    Location loc, Value tensor,
+                    DotOperandEncodingAttr bEncoding,
+                    const SharedMemoryObject &smemObj,
+                    TritonGPUToLLVMTypeConverter *typeConverter, Value thread);
+} // namespace SharedToDotOperandWMMA
 #endif
 
 namespace SharedToDotOperandFMA {
@@ -105,6 +112,10 @@ public:
     if (srcLayout.isa<MfmaEncodingAttr>() &&
         dstLayout.isa<DotOperandEncodingAttr>()) {
       return lowerMfmaToDotOperand(op, adaptor, rewriter);
+    }
+    if (srcLayout.isa<WmmaEncodingAttr>() &&
+        dstLayout.isa<DotOperandEncodingAttr>()) {
+      llvm_unreachable("not implemented yet");
     }
 #endif
     if (srcLayout.isa<SharedEncodingAttr>() &&
@@ -262,6 +273,18 @@ private:
                            multiDimCTAInRepId[1]);
       multiDimOffset[0] = add(multiDimBase[0], i32_val(offsets[elemId][0]));
       multiDimOffset[1] = add(multiDimBase[1], i32_val(offsets[elemId][1]));
+      return multiDimOffset;
+    }
+    if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+      auto multiDimBase = emitBaseIndexForLayout(loc, rewriter, layout, type, false);
+      SmallVector<SmallVector<unsigned>> offsets;
+      assert(rank == 2);
+      SmallVector<Value> multiDimOffset(rank);
+      emitWmmaOffsetForCTA(wmmaLayout, offsets, multiDimCTAInRepId[0],
+                           multiDimCTAInRepId[1]);
+      // FIXME: Act like column major, due to WA in getOrder.
+      multiDimOffset[1] = add(multiDimBase[0], i32_val(offsets[elemId][0]));
+      multiDimOffset[0] = add(multiDimBase[1], i32_val(offsets[elemId][1]));
       return multiDimOffset;
     }
 #endif
@@ -665,6 +688,7 @@ private:
           srcLayout.isa<SliceEncodingAttr>() ||
 #ifdef USE_ROCM
           srcLayout.isa<MfmaEncodingAttr>() ||
+          srcLayout.isa<WmmaEncodingAttr>() ||
 #endif
           srcLayout.isa<MmaEncodingAttr>()) {
         if (isSrcMmaV1)
@@ -702,6 +726,7 @@ private:
           dstLayout.isa<SliceEncodingAttr>() ||
 #ifdef USE_ROCM
           dstLayout.isa<MfmaEncodingAttr>() ||
+          dstLayout.isa<WmmaEncodingAttr>() ||
 #endif
           dstLayout.isa<MmaEncodingAttr>()) {
         if (isDstMmaV1)
@@ -917,6 +942,10 @@ private:
                                      .dyn_cast_or_null<MfmaEncodingAttr>()) {
       res = lowerSharedToDotOperandMFMA(op, adaptor, rewriter, mfmaLayout,
                                         dotOperandLayout, isOuter);
+    } else if (auto wmmaLayout = dotOperandLayout.getParent()
+                                     .dyn_cast_or_null<WmmaEncodingAttr>()) {
+      res = lowerSharedToDotOperandWMMA(op, adaptor, rewriter, wmmaLayout,
+                                        dotOperandLayout, isOuter);
 #endif
     } else if (auto blockedLayout =
                    dotOperandLayout.getParent()
@@ -1077,6 +1106,27 @@ private:
 
     if (!isOuter) {
       res = SharedToDotOperandMFMA::convertLayout(
+          dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
+          smemObj, getTypeConverter(), tid_val());
+    } else {
+      assert(false && "unsupported layout found");
+    }
+    return res;
+  }
+  Value lowerSharedToDotOperandWMMA(
+      triton::gpu::ConvertLayoutOp op, OpAdaptor adaptor,
+      ConversionPatternRewriter &rewriter, const WmmaEncodingAttr &wmmaLayout,
+      const DotOperandEncodingAttr &dotOperandLayout, bool isOuter) const {
+    auto loc = op.getLoc();
+    Value src = op.getSrc();
+    Value dst = op.getResult();
+
+    auto smemObj =
+        getSharedMemoryObjectFromStruct(loc, adaptor.getSrc(), rewriter);
+    Value res;
+
+    if (!isOuter) {
+      res = SharedToDotOperandWMMA::convertLayout(
           dotOperandLayout.getOpIdx(), rewriter, loc, src, dotOperandLayout,
           smemObj, getTypeConverter(), tid_val());
     } else {

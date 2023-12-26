@@ -51,7 +51,8 @@ public:
         cvtOp.getSrc().getType().cast<RankedTensorType>().getEncoding();
 
 #ifdef USE_ROCM
-    if (!encoding.isa<triton::gpu::MfmaEncodingAttr>())
+    if (!encoding.isa<triton::gpu::MfmaEncodingAttr,
+                      triton::gpu::WmmaEncodingAttr>())
       return mlir::failure();
 #else
     if (!encoding.isa<triton::gpu::MmaEncodingAttr>())

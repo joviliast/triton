@@ -18,6 +18,7 @@ using ttg::BlockedEncodingAttr;
 using ttg::ConvertLayoutOp;
 using ttg::DotOperandEncodingAttr;
 using ttg::MfmaEncodingAttr;
+using ttg::WmmaEncodingAttr;
 using ttg::SliceEncodingAttr;
 
 enum class MatrixCoreVersion {
@@ -337,16 +338,12 @@ public:
     auto newAcc = rewriter.create<ttg::ConvertLayoutOp>(oldAcc.getLoc(),
                                                         newRetType, oldAcc);
 
-    // kWidth is a number of consecutive elements per one instruction per one
-    // thread
-    auto kWidth = kDim / 2;
-
     auto newAType = RankedTensorType::get(
         oldAType.getShape(), oldAType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kWidth));
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kDim));
     auto newBType = RankedTensorType::get(
         oldBType.getShape(), oldBType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kWidth));
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kDim));
     a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
     b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
     auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newRetType, a, b,

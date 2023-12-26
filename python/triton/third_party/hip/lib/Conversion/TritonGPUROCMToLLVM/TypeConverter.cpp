@@ -102,7 +102,7 @@ Value TritonGPUToLLVMTypeConverter::packLLElements(
   return llvmStruct;
 }
 
-SmallVector<Value> TritonGPUToLLVMTypeConverter::packMfmaOperand(
+SmallVector<Value> TritonGPUToLLVMTypeConverter::packMatrixCoreOperand(
     const SmallVector<Value> &inValues, Type srcTy,
     ConversionPatternRewriter &rewriter, Location loc) {
   auto tensorTy = srcTy.dyn_cast<RankedTensorType>();

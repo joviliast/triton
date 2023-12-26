@@ -1338,8 +1338,9 @@ inline SmallVector<Value> unpackI32(const SmallVector<Value> &inValues,
   if (!tensorTy)
     return inValues;
   auto encoding = tensorTy.getEncoding().dyn_cast<DotOperandEncodingAttr>();
-  if (!(encoding && (encoding.getParent().isa<MmaEncodingAttr>() or 
-        encoding.getParent().isa<MfmaEncodingAttr>()))) {
+  if (!(encoding &&
+        (encoding.getParent().isa<MmaEncodingAttr>() or
+         encoding.getParent().isa<MfmaEncodingAttr, WmmaEncodingAttr>()))) {
     return inValues;
   }
   SmallVector<Value> outValues;
