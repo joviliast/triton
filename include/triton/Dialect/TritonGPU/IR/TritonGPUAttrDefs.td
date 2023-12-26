@@ -829,6 +829,11 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
     ArrayRefParameter<"unsigned">:$warpsPerCTA
   );
 
+  let extraClassDeclaration = extraBaseClassDeclaration # [{
+    static SmallVector<unsigned> getKMNDimPerWMMAInstr();
+    static SmallVector<unsigned> getElementsNumPerThreadInWarp();
+  }];
+
   let hasCustomAssemblyFormat = 1;
 }
 
@@ -915,8 +920,8 @@ section 9.7.13.4.1 for more details.
     SmallVector<int64_t> getMMAv2Rep(ArrayRef<int64_t> shape,
                                      int bitwidth) const;
 #ifdef USE_ROCM
-    SmallVector<int64_t> getMFMAElemsPerInstr() const;
-    SmallVector<int64_t> getMFMARep(ArrayRef<int64_t> operandShape) const;
+    SmallVector<int64_t> getElemsPerMatrixCoreInstr() const;
+    SmallVector<int64_t> getMatrixCoreInstrRep(ArrayRef<int64_t> operandShape) const;
 #endif
   }];
 }
