@@ -1627,7 +1627,7 @@ public:
     resultVals = maybeDeduplicate(op, resultVals);
     resultVals =
         packI32(resultVals, resultTy, rewriter, loc, this->getTypeConverter());
-    resultVals = this->getTypeConverter()->packMfmaOperand(resultVals, resultTy, rewriter, loc);
+    resultVals = this->getTypeConverter()->packMatrixCoreOperand(resultVals, resultTy, rewriter, loc);
 
     Value view = this->getTypeConverter()->packLLElements(loc, resultVals,
                                                           rewriter, resultTy);

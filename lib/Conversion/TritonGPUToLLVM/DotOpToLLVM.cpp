@@ -8,6 +8,7 @@ using ::mlir::LLVM::getSharedMemoryObjectFromStruct;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getShapePerCTA;
 using ::mlir::triton::gpu::MmaEncodingAttr;
+using ::mlir::triton::gpu::WmmaEncodingAttr;
 
 LogicalResult convertFMADot(triton::DotOp op, triton::DotOp::Adaptor adaptor,
                             TritonGPUToLLVMTypeConverter *typeConverter,
@@ -78,12 +79,16 @@ struct DotOpConversion : public ConvertTritonGPUOpToLLVMPattern<triton::DotOp> {
     }
 
 #ifdef USE_ROCM
-    MfmaEncodingAttr mfmaLayout = D.getType()
-                                      .cast<RankedTensorType>()
-                                      .getEncoding()
-                                      .dyn_cast<MfmaEncodingAttr>();
-    if (!isOuter && mfmaLayout && supportMFMA(op)) {
-      return convertMFMA(op, adaptor, getTypeConverter(), rewriter);
+    if (!isOuter) {
+      auto dEncoding = D.getType().cast<RankedTensorType>().getEncoding();
+      if (dEncoding.isa<MfmaEncodingAttr>() && supportMFMA(op)) {
+        return convertMFMA(op, adaptor, getTypeConverter(), rewriter);
+      }
+      if (dEncoding.isa<WmmaEncodingAttr>() && supportWMMA(op)) {
+        llvm::report_fatal_error(
+          "WMMA dot operations are not supported yet.");
+        //return convertWMMA(op, adaptor, getTypeConverter(), rewriter);
+      }
     }
 #endif
 

@@ -101,7 +101,9 @@ warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps,
 
 SmallVector<unsigned, 2>
 warpsPerTileWMMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
-  return warpsPerTile(dotOp, shape, numWarps, {16, 16});
+  return warpsPerTile(dotOp, shape, numWarps,
+                      {ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr()[0],
+                       ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]});
 }
 
 class BlockedToMFMA : public mlir::RewritePattern {
@@ -318,8 +320,7 @@ public:
 
     ttg::WmmaEncodingAttr wmmaEnc;
 
-    int nonKDim = 16;
-    int kDim = 16;
+    int64_t kDim = ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr()[2];
 
     auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
     wmmaEnc = ttg::WmmaEncodingAttr::get(oldRetType.getContext(), warpsPerTile);

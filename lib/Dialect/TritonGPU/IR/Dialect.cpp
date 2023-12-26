@@ -47,6 +47,8 @@ unsigned getTotalElemsPerThread(Attribute layout, ArrayRef<int64_t> shape,
     return mmaLayout.getTotalElemsPerThread(shape, eltTy);
   } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
     return mfmaLayout.getTotalElemsPerThread(shape, eltTy);
+  } else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+    return wmmaLayout.getTotalElemsPerThread(shape, eltTy);
   } else if (auto sharedLayout = layout.dyn_cast<SharedEncodingAttr>()) {
     return sharedLayout.getTotalElemsPerThread(shape, eltTy);
   } else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>()) {
@@ -67,6 +69,8 @@ SmallVector<unsigned> getElemsPerThread(Attribute layout,
     return mmaLayout.getElemsPerThread(shape, eltTy);
   } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
     return mfmaLayout.getElemsPerThread(shape, eltTy);
+  } else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+    return wmmaLayout.getElemsPerThread(shape, eltTy);
   } else {
     llvm::report_fatal_error("getElemsPerThread not implemented");
     return SmallVector<unsigned>();
@@ -133,6 +137,12 @@ SmallVector<unsigned> getThreadsPerWarp(Attribute layout) {
       return {cols, rows};
     }
   }
+  if (layout.isa<WmmaEncodingAttr>()) {
+    // TODO: get rid of magic numbers
+    constexpr int waveSize = 32;
+    return {waveSize / WmmaEncodingAttr::getMNKDimPerWMMAInstr()[0],
+            WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]};
+  }
   if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     auto parent = sliceLayout.getParent();
     auto parentThreadsPerWarp = getThreadsPerWarp(parent);
@@ -191,6 +201,10 @@ SmallVector<unsigned> getWarpsPerCTA(Attribute layout) {
   if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
     return SmallVector<unsigned>(mfmaLayout.getWarpsPerCTA().begin(),
                                  mfmaLayout.getWarpsPerCTA().end());
+  }
+  if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+    return SmallVector<unsigned>(wmmaLayout.getWarpsPerCTA().begin(),
+                                 wmmaLayout.getWarpsPerCTA().end());
   }
   if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     auto parent = sliceLayout.getParent();
@@ -280,6 +294,8 @@ SmallVector<unsigned> getSizePerThread(Attribute layout) {
     } else {
       return {rows, cols};
     }
+  } else if (layout.isa<WmmaEncodingAttr>()) {
+    return WmmaEncodingAttr::getElementsNumPerThreadInWarp();
   } else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>()) {
     auto parentLayout = dotLayout.getParent();
     assert(parentLayout && "DotOperandEncodingAttr must have a parent");
@@ -302,7 +318,18 @@ SmallVector<unsigned> getSizePerThread(Attribute layout) {
       } else if (opIdx == 1) {
         return {1, 4};
       } else {
-        assert(0 && "DotOperandEncodingAttr opIdx must be 0 or 1");
+        llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+        return {};
+      }
+    } else if (parentLayout.isa<WmmaEncodingAttr>()) {
+      auto opIdx = dotLayout.getOpIdx();
+      SmallVector<unsigned> elemsPerThread = WmmaEncodingAttr::getElementsNumPerThreadInWarp();
+      if (opIdx == 0) { // column major
+        return {elemsPerThread.rbegin(), elemsPerThread.rend()};
+      } else if (opIdx == 1) { // row major
+        return elemsPerThread;
+      } else {
+        llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
         return {};
       }
     } else {
@@ -424,6 +451,10 @@ SmallVector<unsigned> getShapePerCTATile(Attribute layout,
     unsigned nDim = mfmaLayout.getNDim();
     return {mDim * mfmaLayout.getWarpsPerCTA()[0],
             nDim * mfmaLayout.getWarpsPerCTA()[1]};
+  } else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>()) {
+    auto mnkDim = WmmaEncodingAttr::getMNKDimPerWMMAInstr();
+    return {mnkDim[0] * wmmaLayout.getWarpsPerCTA()[0],
+            mnkDim[1] * wmmaLayout.getWarpsPerCTA()[1]};
   } else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>()) {
     auto parentLayout = dotLayout.getParent();
     assert(parentLayout && "DotOperandEncodingAttr must have a parent");
@@ -493,11 +524,7 @@ SmallVector<unsigned> getOrder(Attribute layout) {
   if (auto blockedLayout = layout.dyn_cast<BlockedEncodingAttr>()) {
     return SmallVector<unsigned>(blockedLayout.getOrder().begin(),
                                  blockedLayout.getOrder().end());
-  } else if (auto mmaLayout = layout.dyn_cast<MmaEncodingAttr>()) {
-    return {1, 0};
-  } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
-    return {1, 0};
-  } else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>()) {
+  } else if (layout.isa<MmaEncodingAttr, MfmaEncodingAttr, WmmaEncodingAttr, DotOperandEncodingAttr>()) {
     return {1, 0};
   } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     SmallVector<unsigned> parentOrder = getOrder(sliceLayout.getParent());
@@ -595,7 +622,7 @@ SmallVector<unsigned> getCTASplitNum(Attribute layout) {
     res.assign(mmaLayout.getCTALayout().getCTASplitNum().begin(),
                mmaLayout.getCTALayout().getCTASplitNum().end());
 #ifdef USE_ROCM
-  } else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
+  } else if (layout.isa<MfmaEncodingAttr, WmmaEncodingAttr>()) {
     res.resize(2);
     res[0] = res[1] = 1;
 #endif
@@ -682,6 +709,8 @@ unsigned getNumWarpsPerCTA(Attribute layout) {
 #ifdef USE_ROCM
   else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>())
     warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>())
+    warpsPerCTA = wmmaLayout.getWarpsPerCTA();
 #endif
   else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>())
     return getNumWarpsPerCTA(dotLayout.getParent());
@@ -701,9 +730,8 @@ unsigned getNumCTAs(Attribute layout) {
   else if (auto mmaLayout = layout.dyn_cast<MmaEncodingAttr>())
     CTAsPerCGA = mmaLayout.getCTALayout().getCTAsPerCGA();
 #ifdef USE_ROCM
-  else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>()) {
+  else if (layout.isa<MfmaEncodingAttr, WmmaEncodingAttr>())
     return 1;
-  }
 #endif
   else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>())
     return getNumCTAs(dotLayout.getParent());
@@ -716,7 +744,8 @@ unsigned getNumCTAs(Attribute layout) {
 
 bool isaDistributedLayout(Attribute layout) {
   return layout.isa<BlockedEncodingAttr>() || layout.isa<MmaEncodingAttr>() ||
-         layout.isa<MfmaEncodingAttr>() || layout.isa<SliceEncodingAttr>();
+         layout.isa<MfmaEncodingAttr>() || layout.isa<WmmaEncodingAttr>() ||
+         layout.isa<SliceEncodingAttr>();
 }
 
 bool sameBlockedEncodings(BlockedEncodingAttr blockedA,
@@ -959,6 +988,16 @@ MfmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const {
 }
 
 SmallVector<unsigned>
+WmmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const {
+  assert(shape.size() == 2 && "Unexpected rank of wmma layout");
+
+  return {
+    ceil<unsigned>(shape[0], getElementsNumPerThreadInWarp()[0] * getWarpsPerCTA()[0]),
+    ceil<unsigned>(shape[1], getElementsNumPerThreadInWarp()[1] * getWarpsPerCTA()[1]),
+          };
+}
+
+SmallVector<unsigned>
 MmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const {
   size_t rank = shape.size();
   assert(rank == 2 && "Unexpected rank of mma layout");
@@ -1005,6 +1044,11 @@ MmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape, Type eltTy) const {
 }
 
 unsigned MfmaEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
+                                                  Type eltTy) const {
+  return product<unsigned>(getElemsPerThread(shape, eltTy));
+}
+
+unsigned WmmaEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
                                                   Type eltTy) const {
   return product<unsigned>(getElemsPerThread(shape, eltTy));
 }
@@ -1076,30 +1120,35 @@ DotOperandEncodingAttr::getMMAv2Rep(ArrayRef<int64_t> shape,
 }
 
 SmallVector<int64_t>
-DotOperandEncodingAttr::getMFMAElemsPerInstr() const {
-  auto mfmaLayout = getParent().cast<MfmaEncodingAttr>();
-  unsigned mDim = mfmaLayout.getMDim();
-  unsigned nDim = mfmaLayout.getNDim();
-  assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
-         (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
-  int64_t kWidth = getKWidth();
-  constexpr int waveSize = 64; // MFMA is used on wave64 architectures only
-  int kGroups = -1;
-  if (mDim == nDim)
-    kGroups = waveSize / mDim;
-  if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
-    kGroups = 1;
-  int64_t kDim = kWidth * kGroups;
-  if (getOpIdx() == 0)
-    return {mDim, kDim};
-  else
-    return {kDim, nDim};
+DotOperandEncodingAttr::getElemsPerMatrixCoreInstr() const {
+  if(auto mfmaLayout = getParent().dyn_cast<MfmaEncodingAttr>()) {
+    unsigned mDim = mfmaLayout.getMDim();
+    unsigned nDim = mfmaLayout.getNDim();
+    assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
+          (mDim == 64 && nDim == 4) || (mDim == 4 && nDim == 64));
+    int64_t kWidth = getKWidth();
+    constexpr int waveSize = 64; // MFMA is used on wave64 architectures only
+    int kGroups = -1;
+    if (mDim == nDim)
+      kGroups = waveSize / mDim;
+    if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
+      kGroups = 1;
+    int64_t kDim = kWidth * kGroups;
+    if (getOpIdx() == 0)
+      return {mDim, kDim};
+    else
+      return {kDim, nDim};
+  } else if (getParent().isa<WmmaEncodingAttr>()) {
+    auto mnkDim = WmmaEncodingAttr::getMNKDimPerWMMAInstr();
+    return {mnkDim[0], mnkDim[1]};
+  }
+  assert(false && "getElemsPerMatrixCoreInstr(): parent layout is not supported");
 }
 
 SmallVector<int64_t>
-DotOperandEncodingAttr::getMFMARep(ArrayRef<int64_t> operandShape) const {
-  auto operandTileShape = getMFMAElemsPerInstr();
-  auto warpsPerCTA = getParent().cast<MfmaEncodingAttr>().getWarpsPerCTA();
+DotOperandEncodingAttr::getMatrixCoreInstrRep(ArrayRef<int64_t> operandShape) const {
+  auto operandTileShape = getElemsPerMatrixCoreInstr();
+  auto warpsPerCTA = getWarpsPerCTA(getParent());
   if (getOpIdx() == 0)
     return {
         std::max<int64_t>(1, operandShape[0] / (operandTileShape[0] * warpsPerCTA[0])),
@@ -1121,12 +1170,13 @@ DotOperandEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
 
 unsigned DotOperandEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
                                                         Type eltTy) const {
-  if (auto mfmaParent = getParent().dyn_cast<MfmaEncodingAttr>()) {
-    int warpsPerCTAM = mfmaParent.getWarpsPerCTA()[0];
-    int warpsPerCTAN = mfmaParent.getWarpsPerCTA()[1];
+  if (getParent().isa<MfmaEncodingAttr, WmmaEncodingAttr>()) {
+    auto warpsPerCTA = getWarpsPerCTA(getParent());
+    int warpsPerCTAM = warpsPerCTA[0];
+    int warpsPerCTAN = warpsPerCTA[1];
     constexpr int waveSize = 64;
-    auto tileSize = getMFMAElemsPerInstr();
-    auto rep = getMFMARep(shape);
+    auto tileSize = getElemsPerMatrixCoreInstr();
+    auto rep = getMatrixCoreInstrRep(shape);
     return rep[0] * rep[1];
   }
   auto shapePerCTA = getShapePerCTA(*this, shape);
@@ -1444,6 +1494,14 @@ void MfmaEncodingAttr::print(AsmPrinter &printer) const {
 //===----------------------------------------------------------------------===//
 // WMMA encoding
 //===----------------------------------------------------------------------===//
+
+SmallVector<unsigned> WmmaEncodingAttr::getMNKDimPerWMMAInstr() {
+  // TODO: move magic numbers out of the code
+  return {16, 16, 16};
+}
+SmallVector<unsigned> WmmaEncodingAttr::getElementsNumPerThreadInWarp() {
+  return {1, 8};
+}
 
 Attribute WmmaEncodingAttr::parse(AsmParser &parser, Type type) {
   if (parser.parseLess().failed())

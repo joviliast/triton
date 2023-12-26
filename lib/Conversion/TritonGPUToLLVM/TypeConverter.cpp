@@ -10,6 +10,7 @@ using ::mlir::triton::gpu::BlockedEncodingAttr;
 using ::mlir::triton::gpu::DotOperandEncodingAttr;
 using ::mlir::triton::gpu::getTotalElemsPerThread;
 using ::mlir::triton::gpu::MfmaEncodingAttr;
+using ::mlir::triton::gpu::WmmaEncodingAttr;
 using ::mlir::triton::gpu::MmaEncodingAttr;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 using ::mlir::triton::gpu::SliceEncodingAttr;
@@ -105,14 +106,14 @@ Value TritonGPUToLLVMTypeConverter::packLLElements(
   return llvmStruct;
 }
 
-SmallVector<Value> TritonGPUToLLVMTypeConverter::packMfmaOperand(
+SmallVector<Value> TritonGPUToLLVMTypeConverter::packMatrixCoreOperand(
     const SmallVector<Value> &inValues, Type srcTy,
     ConversionPatternRewriter &rewriter, Location loc) {
   auto tensorTy = srcTy.dyn_cast<RankedTensorType>();
   if (!tensorTy)
     return inValues;
   auto encoding = tensorTy.getEncoding().dyn_cast<DotOperandEncodingAttr>();
-  if (!(encoding && encoding.getParent().isa<MfmaEncodingAttr>())) {
+  if (!(encoding && encoding.getParent().isa<MfmaEncodingAttr, WmmaEncodingAttr>())) {
     return inValues;
   }
 
