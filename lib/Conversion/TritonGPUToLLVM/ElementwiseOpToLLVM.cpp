@@ -1338,8 +1338,9 @@ inline SmallVector<Value> unpackI32(const SmallVector<Value> &inValues,
   if (!tensorTy)
     return inValues;
   auto encoding = tensorTy.getEncoding().dyn_cast<DotOperandEncodingAttr>();
-  if (!(encoding && (encoding.getParent().isa<MmaEncodingAttr>() or 
-        encoding.getParent().isa<MfmaEncodingAttr>()))) {
+  if (!(encoding &&
+        (encoding.getParent().isa<MmaEncodingAttr>() or
+         encoding.getParent().isa<MfmaEncodingAttr, WmmaEncodingAttr>()))) {
     return inValues;
   }
   SmallVector<Value> outValues;
@@ -1627,7 +1628,7 @@ public:
     resultVals = maybeDeduplicate(op, resultVals);
     resultVals =
         packI32(resultVals, resultTy, rewriter, loc, this->getTypeConverter());
-    resultVals = this->getTypeConverter()->packMfmaOperand(resultVals, resultTy, rewriter, loc);
+    resultVals = this->getTypeConverter()->packMatrixCoreOperand(resultVals, resultTy, rewriter, loc);
 
     Value view = this->getTypeConverter()->packLLElements(loc, resultVals,
                                                           rewriter, resultTy);

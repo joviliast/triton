@@ -18,6 +18,7 @@ using ttg::BlockedEncodingAttr;
 using ttg::ConvertLayoutOp;
 using ttg::DotOperandEncodingAttr;
 using ttg::MfmaEncodingAttr;
+using ttg::WmmaEncodingAttr;
 using ttg::SliceEncodingAttr;
 
 enum class MatrixCoreVersion {
@@ -332,16 +333,12 @@ public:
     auto newAcc = rewriter.create<ttg::ConvertLayoutOp>(oldAcc.getLoc(),
                                                         newRetType, oldAcc);
 
-    // kWidth is a number of consecutive elements per one instruction per one
-    // thread
-    auto kWidth = kDim / 2;
-
     auto newAType = RankedTensorType::get(
         oldAType.getShape(), oldAType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kWidth));
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kDim));
     auto newBType = RankedTensorType::get(
         oldBType.getShape(), oldBType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kWidth));
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kDim));
     a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
     b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
     auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newRetType, a, b,
@@ -364,11 +361,9 @@ class TritonAMDGPUAccelerateMatmulPass
 public:
   TritonAMDGPUAccelerateMatmulPass() = default;
   TritonAMDGPUAccelerateMatmulPass(StringRef archGen,
-                                   int matrixInstructionSize,
-                                   bool enableWmmaTransform) {
+                                   int matrixInstructionSize) {
     this->archGenerationName = archGen.data();
     this->matrixInstructionSize = matrixInstructionSize;
-    this->enableWmmaTransform = enableWmmaTransform;
   }
   void runOnOperation() override {
     MLIRContext *context = &getContext();
@@ -381,8 +376,7 @@ public:
         MatrixCoreVersion::CDNA_MFMA3 == matrixCoreVer) {
       patterns.add<::BlockedToMFMA>(context, getMfmaVersion(matrixCoreVer),
                                     matrixInstructionSize);
-    } else if (MatrixCoreVersion::RDNA_WMMA == matrixCoreVer &&
-               enableWmmaTransform) {
+    } else if (MatrixCoreVersion::RDNA_WMMA == matrixCoreVer) {
       patterns.add<::BlockedToWMMA>(context);
     }
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
@@ -396,5 +390,5 @@ mlir::createTritonAMDGPUAccelerateMatmulPass(std::string archGen,
                                              int matrixInstructionSize,
                                              bool enableWmmaTransform) {
   return std::make_unique<TritonAMDGPUAccelerateMatmulPass>(
-      archGen, matrixInstructionSize, enableWmmaTransform);
+      archGen, matrixInstructionSize, true);
 }

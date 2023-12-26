@@ -1211,6 +1211,35 @@ private:
     return offsets;
   }
 
+  SmallVector<Value>
+  emitBaseIndexForWmmaLayout(Location loc, ConversionPatternRewriter &rewriter,
+                             const WmmaEncodingAttr &wmmaLayout,
+                             RankedTensorType type) const {
+    auto shape = type.getShape();
+    auto _warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+    assert(_warpsPerCTA.size() == 2);
+    SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
+                                      i32_val(_warpsPerCTA[1])};
+    int kmnDim = WmmaEncodingAttr::getKMNDimPerWMMAInstr();
+
+    Value threadId = getThreadId(rewriter, loc);
+    Value warpSize = i32_val(triton::gpu_rocm::getWarpSize(wmmaLayout));
+    Value laneId = urem(threadId, warpSize);
+
+    Value warpId = udiv(threadId, warpSize);
+    Value warpId0 =
+        urem(urem(warpId, warpsPerCTA[0]), i32_val(shape[0] / kmnDim[1]));
+    Value warpId1 = urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]),
+                         i32_val(shape[1] / kmnDim[2]));
+
+    Value offWarp0 = mul(warpId0, i32_val(kmnDim[1]));
+    Value offWarp1 = mul(warpId1, i32_val(kmnDim[2]));
+
+    SmallVector<Value> multiDimBase = {add(urem(laneId, i32_val(nonKDim)), offWarp0),//
+                                       add(udiv(laneId, i32_val(nonKDim)), offWarp1)};
+    return multiDimBase;
+  }
+
   // Emit indices calculation within each ConversionPattern, and returns a
   // [elemsPerThread X rank] index matrix.
   SmallVector<SmallVector<Value>> emitIndicesForDistributedLayout(

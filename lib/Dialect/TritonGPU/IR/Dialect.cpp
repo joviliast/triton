@@ -524,8 +524,12 @@ SmallVector<unsigned> getOrder(Attribute layout) {
   if (auto blockedLayout = layout.dyn_cast<BlockedEncodingAttr>()) {
     return SmallVector<unsigned>(blockedLayout.getOrder().begin(),
                                  blockedLayout.getOrder().end());
-  } else if (layout.isa<MmaEncodingAttr, MfmaEncodingAttr, WmmaEncodingAttr, DotOperandEncodingAttr>()) {
+  } else if (layout.isa<MmaEncodingAttr, MfmaEncodingAttr, DotOperandEncodingAttr>()) {
     return {1, 0};
+  } else if (layout.isa<WmmaEncodingAttr>()) {
+    // TODO: fix me. Should be row major. Need to fix upstream vector size calc.
+    // see getScratchConfigForCvtLayout.
+    return {0, 1};
   } else if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     SmallVector<unsigned> parentOrder = getOrder(sliceLayout.getParent());
     unsigned dim = sliceLayout.getDim();
@@ -709,6 +713,8 @@ unsigned getNumWarpsPerCTA(Attribute layout) {
 #ifdef USE_ROCM
   else if (auto mfmaLayout = layout.dyn_cast<MfmaEncodingAttr>())
     warpsPerCTA = mfmaLayout.getWarpsPerCTA();
+  else if (auto wmmaLayout = layout.dyn_cast<WmmaEncodingAttr>())
+    warpsPerCTA = wmmaLayout.getWarpsPerCTA();
 #endif
   else if (auto dotLayout = layout.dyn_cast<DotOperandEncodingAttr>())
     return getNumWarpsPerCTA(dotLayout.getParent());
@@ -742,7 +748,8 @@ unsigned getNumCTAs(Attribute layout) {
 
 bool isaDistributedLayout(Attribute layout) {
   return layout.isa<BlockedEncodingAttr>() || layout.isa<MmaEncodingAttr>() ||
-         layout.isa<MfmaEncodingAttr>() || layout.isa<SliceEncodingAttr>();
+         layout.isa<MfmaEncodingAttr>() || layout.isa<WmmaEncodingAttr>() ||
+         layout.isa<SliceEncodingAttr>();
 }
 
 bool sameBlockedEncodings(BlockedEncodingAttr blockedA,
@@ -1117,8 +1124,8 @@ DotOperandEncodingAttr::getMMAv2Rep(ArrayRef<int64_t> shape,
 }
 
 SmallVector<int64_t>
-DotOperandEncodingAttr::getMFMAElemsPerInstr() const {
-  if(auto mfmaEncoding = getParent().dyn_cast<MfmaEncodingAttr>()) {
+DotOperandEncodingAttr::getElemsPerMatrixCoreInstr() const {
+  if(auto mfmaLayout = getParent().dyn_cast<MfmaEncodingAttr>()) {
     unsigned mDim = mfmaLayout.getMDim();
     unsigned nDim = mfmaLayout.getNDim();
     assert((mDim == nDim) && (mDim == 32 || mDim == 16 || mDim == 4) ||
@@ -1147,9 +1154,9 @@ DotOperandEncodingAttr::getMatrixCoreInstrRep(ArrayRef<int64_t> operandShape) co
   auto operandTileShape = getElemsPerMatrixCoreInstr();
   auto warpsPerCTA = getWarpsPerCTA(getParent());
   if (getOpIdx() == 0)
-    return {
-        std::max<int64_t>(1, operandShape[0] / (operandTileShape[0] * warpsPerCTA[0])),
-        std::max<int64_t>(1, operandShape[1] / operandTileShape[1])};
+    return {std::max<int64_t>(1, operandShape[0] /
+                                     (operandTileShape[0] * warpsPerCTA[0])),
+            std::max<int64_t>(1, operandShape[1] / operandTileShape[1])};
   else {
     assert(getOpIdx() == 1);
     return {std::max<int64_t>(1, operandShape[0] / operandTileShape[0]),
