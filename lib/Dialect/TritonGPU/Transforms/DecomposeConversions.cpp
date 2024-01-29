@@ -56,6 +56,8 @@ public:
             srcMfmaEncoding.getIsTransposed() &&
             dstDotOp.getParent() == srcMfmaEncoding)
           return;
+      } else if (srcEncoding.isa<triton::gpu::WmmaEncodingAttr>()) {
+        assert(false);
       }
 #endif
       auto tmpType = RankedTensorType::get(

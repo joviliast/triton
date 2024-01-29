@@ -223,7 +223,6 @@ computeOffsetsAType(ConversionPatternRewriter &rewriter, Location loc,
   }
   return aOffsets;
 }
-
 llvm::SmallVector<Value>
 computeOffsetsBType(ConversionPatternRewriter &rewriter, Location loc,
                     const ArrayRef<int64_t> &elemsPerInstr, Value waveId,
@@ -384,7 +383,6 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   int loadsPerThread = offsets.size() / (numRepNonK * numRepK);
   int elemsPerLoad = numElemsPerThreadPerRep / loadsPerThread;
   assert(numElemsPerThreadPerRep % loadsPerThread == 0);
-
   for (int nonK = 0; nonK < numRepNonK; ++nonK) {
     for (int k = 0; k < numRepK; ++k) {
       auto vecTy = vec_ty(resElemTy, numElemsPerThreadPerRep);

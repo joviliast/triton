@@ -257,10 +257,10 @@ struct DotOpWMMAConversionHelper {
     for (int m = 0; m < numRepM; ++m) {
       for (int n = 0; n < numRepN; ++n) {
         Value acc = undef(vecTy);
-        for (unsigned v = 0; v < elemsPerVec; ++v) {
+        for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
           acc = insert_element(
-              vecTy, acc, fc[m * numRepN * elemsPerVec + n * elemsPerVec + v],
-              i32_val(v));
+              vecTy, acc, fc[m * numRepN * dElemsToStorePerThread + n * dElemsToStorePerThread + v],
+              i32_val(v * 2));
         }
         acc = zeroAuxiliarBlocks(subBlocks, acc);
         for (size_t k = 0; k < numRepK; k++) {

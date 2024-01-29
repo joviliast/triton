@@ -847,8 +847,9 @@ private:
 
       if (!srcEnc.isa<
               triton::gpu::
-                  MfmaEncodingAttr /*, triton::gpu::WmmaEncodingAttr*/>() ||
+                  MfmaEncodingAttr , triton::gpu::WmmaEncodingAttr>() ||
           !dstBlocked) {
+            //assert(false);
         return;
       }
 
@@ -1115,7 +1116,7 @@ private:
                          .cast<RankedTensorType>()
                          .getEncoding()
                          .dyn_cast<WmmaEncodingAttr>()) {
-        // assert(false);
+        //assert(false);
         Type BElType =
             dotOp.getB().getType().cast<RankedTensorType>().getElementType();
 

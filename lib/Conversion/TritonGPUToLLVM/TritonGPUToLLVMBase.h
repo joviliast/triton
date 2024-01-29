@@ -688,6 +688,8 @@ public:
     SmallVector<Value> CTAOffset(rank);
     for (unsigned i = 0; i < rank; ++i)
       CTAOffset[i] = mul(multiDimClusterCTAId[i], i32_val(shapePerCTA[i]));
+//printValues(loc, rewriter,"off0", {CTAOffset[0]});
+//printValues(loc, rewriter,"off1", {CTAOffset[1]});
 
     return CTAOffset;
   }
@@ -816,8 +818,8 @@ public:
     assert(warpSize == 32);
     auto shapePerCta = getShapePerCTATile(wmmaLayout);
     for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
-      offsets.push_back({ctaOffsetX * shapePerCta[0],
-                         ctaOffsetY * shapePerCta[1] + 2 * elem});
+      offsets.push_back({ctaOffsetX * shapePerCta[0] + 2 * elem,
+                         ctaOffsetY * shapePerCta[1]});
     }
   }
 #endif
@@ -847,7 +849,7 @@ public:
       } else if (auto mfma = layout.dyn_cast<MfmaEncodingAttr>()) {
         result = 
             emitIndicesForDistributedLayout(loc, b, mfma, type, withCTAOffset);
-      }else if (layout.isa<WmmaEncodingAttr>()) {
+      } else if (layout.isa<WmmaEncodingAttr>()) {
             assert(false);
       } else if (auto slice = layout.dyn_cast<SliceEncodingAttr>()) {
         result =
@@ -1293,18 +1295,17 @@ private:
     Value threadId = getThreadId(rewriter, loc);
     Value warpSize = i32_val(triton::gpu::getWarpSize(wmmaLayout));
     Value laneId = urem(threadId, i32_val(triton::gpu::getWarpSize(wmmaLayout) / 2));
+    Value threadIdPerWarp = urem(threadId, warpSize);
 
     Value warpId = udiv(threadId, warpSize);
-    Value warpId0 =
-        urem(urem(warpId, warpsPerCTA[0]), i32_val(shape[0] / mnkDim[0]));
-    Value warpId1 = urem(urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]),
-                         i32_val(shape[1] / mnkDim[2]));
+    Value warpId0 = urem(warpId, warpsPerCTA[0]);
+    Value warpId1 = urem(udiv(warpId, warpsPerCTA[0]), warpsPerCTA[1]);
 
     Value offWarp0 = mul(warpId0, i32_val(mnkDim[0]));
     Value offWarp1 = mul(warpId1, i32_val(mnkDim[1]));
 
-    return {add(laneId, offWarp0),
-            add(udiv(threadId, i32_val(mnkDim[2])), offWarp1)};
+    return {add(udiv(threadIdPerWarp, i32_val(mnkDim[2])), offWarp0),
+            add(laneId, offWarp1)};
   }
 
   SmallVector<SmallVector<unsigned>>
