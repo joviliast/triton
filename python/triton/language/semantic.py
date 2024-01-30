@@ -1330,15 +1330,15 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, allow_tf32: bool, max_nu
         if lhs.type.scalar.is_int():
             ret_dot_scalar_ty = tl.int32
             _0 = builder.create_splat(builder.get_int32(0), [M, N])
-        elif lhs.type.scalar.is_fp16:
-            if ret_scalar_ty.is_fp16:
+        elif lhs.type.scalar.is_fp16():
+            if ret_scalar_ty.is_fp16():
                 ret_dot_scalar_ty = tl.float16
                 _0 = builder.create_splat(builder.get_fp16(0), [M, N])
             else:
                 ret_dot_scalar_ty = tl.float32
                 _0 = builder.create_splat(builder.get_fp32(0), [M, N])
-        elif lhs.type.scalar.is_bf16:
-            if ret_scalar_ty.is_bf16:
+        elif lhs.type.scalar.is_bf16():
+            if ret_scalar_ty.is_bf16():
                 ret_dot_scalar_ty = tl.bfloat16
                 _0 = builder.create_splat(builder.get_bf16(0), [M, N])
             else:
@@ -1348,6 +1348,7 @@ def dot(lhs: tl.tensor, rhs: tl.tensor, acc: tl.tensor, allow_tf32: bool, max_nu
         ret_ty = tl.block_type(ret_dot_scalar_ty, [M, N])
         ret = tl.tensor(builder.create_dot(lhs.handle, rhs.handle, _0, allow_tf32, max_num_imprecise_acc),
                         ret_ty)
+
         return cast(ret, ret_scalar_ty, builder)
     # Cast operands of types f16 and i8 for configurations where FMA only supported.
     if is_hip() and not mfma_supported(M, N, lhs.type.shape[1], allow_tf32, ret_scalar_ty, builder.target):
