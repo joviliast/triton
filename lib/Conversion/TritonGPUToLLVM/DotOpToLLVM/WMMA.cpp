@@ -87,10 +87,10 @@ struct DotOpWMMAConversionHelper {
     switch (wmmaDescr.coreType) {
     case MatrixCoreType::FP32_FP16:
       return rewriter.create<ROCDL::wmma_f32_16x16x16_f16>(
-          loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+          loc, TypeRange{resType}, ValueRange{valA, valB, valC});
     case MatrixCoreType::FP32_BF16:
       return rewriter.create<ROCDL::wmma_f32_16x16x16_bf16>(
-          loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+          loc, TypeRange{resType}, ValueRange{valA, valB, valC});
     case MatrixCoreType::FP16_FP16:
       return rewriter.create<ROCDL::wmma_f16_16x16x16_f16>(
           loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
@@ -246,11 +246,13 @@ struct DotOpWMMAConversionHelper {
         typeConverter->unpackLLElements(loc, loadedC, rewriter, dstElemTy);
 
     unsigned warpSize = triton::gpu::getWarpSize(wmmaLayout);
-    unsigned laneSize = 2;
+    // TODO get rid of magic numbers
+    unsigned vgprElemWidth = 32;
+    unsigned paddedOutputElemSize = vgprElemWidth / dstElemTy.getIntOrFloatBitWidth();
     // compute number of output elements that each thread holds for one WMMA
     // instruction.
-    auto elemsPerVec = mnkDim[0] * mnkDim[1] * laneSize / warpSize;
-    auto dElemsToStorePerThread = elemsPerVec / laneSize;
+    auto elemsPerVec = mnkDim[0] * mnkDim[1] * paddedOutputElemSize / warpSize;
+    auto dElemsToStorePerThread = mnkDim[0] * mnkDim[1] / warpSize;
     const int subBlocks =
         getNumSubmatrices(aTensorTy.getElementType(), mnkDim[2]);
     auto vecTy = vec_ty(dstElemTy, elemsPerVec);
@@ -260,7 +262,7 @@ struct DotOpWMMAConversionHelper {
         for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
           acc = insert_element(
               vecTy, acc, fc[m * numRepN * dElemsToStorePerThread + n * dElemsToStorePerThread + v],
-              i32_val(v * 2));
+              i32_val(v * paddedOutputElemSize));
         }
         acc = zeroAuxiliarBlocks(subBlocks, acc);
         for (size_t k = 0; k < numRepK; k++) {
@@ -269,7 +271,7 @@ struct DotOpWMMAConversionHelper {
         acc = reduceSubBlocks(subBlocks, acc);
         for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
           fc[m * numRepN * dElemsToStorePerThread + n * dElemsToStorePerThread + v] =
-              extract_element(dstElemTy, acc, i32_val(v * 2));
+              extract_element(dstElemTy, acc, i32_val(v * paddedOutputElemSize));
         }
       }
     }
