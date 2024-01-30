@@ -132,6 +132,23 @@ warpsPerTileWMMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
                        ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]});
 }
 
+bool isChainDot(tt::DotOp &dotOp) {
+  auto filter = [&dotOp](Operation *op) {
+    return op->getParentRegion() == dotOp->getParentRegion();
+  };
+  mlir::ForwardSliceOptions fwdOpt;
+  fwdOpt.filter = filter;
+  mlir::BackwardSliceOptions bwdOpt;
+  bwdOpt.omitBlockArguments = true;
+  bwdOpt.filter = filter;
+  auto slices = mlir::getSlice(dotOp, bwdOpt, fwdOpt);
+  for (Operation *op : slices) {
+    if (isa<tt::DotOp>(op) && (op != dotOp))
+      return true;
+  }
+  return false;
+}
+
 class BlockedToMFMA : public mlir::RewritePattern {
   int mfmaVersion;
   int enforcedNonKDim;
@@ -312,6 +329,14 @@ public:
     if (!supportWMMA(dotOp))
       return failure();
 
+    // Not supported yet
+    if (isChainDot(dotOp))
+      return failure();
+
+    // Not supported yet
+    //if (dotOp.getA().getType() != dotOp.getC().getType())
+    //  return failure();
+
     // get WMMA encoding for the given number of warps
     auto retShape = oldRetType.getShape();
     auto mod = op->getParentOfType<mlir::ModuleOp>();
@@ -326,9 +351,14 @@ public:
 
     ttg::WmmaEncodingAttr wmmaEnc;
 
-    int64_t kDim = ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr()[2];
+    auto mnkDim = ttg::WmmaEncodingAttr::getMNKDimPerWMMAInstr();
 
     auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
+
+    // Not supported yet
+    if (retShape[0] < warpsPerTile[0] * mnkDim[0] || retShape[1] < warpsPerTile[1] * mnkDim[1])
+      return failure();
+
     wmmaEnc = ttg::WmmaEncodingAttr::get(oldRetType.getContext(), warpsPerTile);
     auto newRetType =
         RankedTensorType::get(retShape, oldRetType.getElementType(), wmmaEnc);
@@ -340,10 +370,10 @@ public:
 
     auto newAType = RankedTensorType::get(
         oldAType.getShape(), oldAType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, kDim));
+        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, mnkDim[2]));
     auto newBType = RankedTensorType::get(
         oldBType.getShape(), oldBType.getElementType(),
-        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, kDim));
+        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, mnkDim[2]));
     a = rewriter.create<ttg::ConvertLayoutOp>(a.getLoc(), newAType, a);
     b = rewriter.create<ttg::ConvertLayoutOp>(b.getLoc(), newBType, b);
     auto newDot = rewriter.create<tt::DotOp>(dotOp.getLoc(), newRetType, a, b,
