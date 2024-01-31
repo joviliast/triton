@@ -1862,8 +1862,7 @@ struct FpToFpOpConversion
 
     Type srcType = useFP16IntermediateSrc ? f16_ty : srcElementType;
     Type dstType = useFP16IntermediateDst ? f16_ty : dstElementType;
-    auto cvtFunc = getConversionFunc(srcType, dstType);
-    SmallVector<Value> inVals;
+    SmallVector<Value> inVals, outVals;
     for (unsigned i = 0; i < std::min(numElements, operands.size()); i++) {
       inVals.push_back(operands[i][0]);
     }
@@ -1871,7 +1870,12 @@ struct FpToFpOpConversion
       for (Value &v : inVals)
         v = convertFp32ToFp16NZ(loc, rewriter, v);
     inVals.resize(numElements, undef(typeConverter->convertType(srcType)));
-    SmallVector<Value> outVals = cvtFunc(loc, rewriter, inVals);
+    if (srcType != dstType) {
+      auto cvtFunc = getConversionFunc(srcType, dstType);
+      outVals = cvtFunc(loc, rewriter, inVals);
+    } else {
+      outVals = inVals;
+    }
     assert(outVals.size() == inVals.size());
     outVals.resize(std::min(numElements, operands.size()));
     if (useFP16IntermediateDst)

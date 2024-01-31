@@ -740,7 +740,6 @@ private:
       auto dstDotOp =
           dstType.getEncoding().dyn_cast<triton::gpu::DotOperandEncodingAttr>();
       if (srcWmma && dstDotOp) {
-        assert(false);
         auto tmpType = RankedTensorType::get(
             dstType.getShape(), dstType.getElementType(),
             triton::gpu::BlockedEncodingAttr::get(

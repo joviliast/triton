@@ -330,8 +330,8 @@ public:
       return failure();
 
     // Not supported yet
-    if (isChainDot(dotOp))
-      return failure();
+    //if (isChainDot(dotOp))
+    //  return failure();
 
     // Not supported yet
     //if (dotOp.getA().getType() != dotOp.getC().getType())
