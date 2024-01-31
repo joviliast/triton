@@ -336,6 +336,11 @@ struct TritonAMDGPUDotSlicingPass
       // TODO: Implement changing of mfma layout in case it is not suitable for
       // slicing (similar as in setBlockedLayout).
       assert(this->sliceKTile % shapePerCTA[1] == 0);
+    } else if (auto wmmaEncoding = dyn_cast<ttg::WmmaEncodingAttr>(encoding)) {
+      auto shapePerCTA = ttg::getShapePerCTATile(wmmaEncoding, srcShape);
+      // TODO: Implement changing of mfma layout in case it is not suitable for
+      // slicing (similar as in setBlockedLayout).
+      assert(this->sliceKTile % shapePerCTA[1] == 0);
     } else {
       assert(false && "Unsupported layout in setLayoutForSlicing.");
     }

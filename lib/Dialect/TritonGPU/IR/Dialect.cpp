@@ -803,6 +803,24 @@ bool sameMfmaEncodings(MfmaEncodingAttr mfmaA, MfmaEncodingAttr mfmaB) {
   return true;
 }
 
+bool sameWmmaEncodings(WmmaEncodingAttr wmmaA, WmmaEncodingAttr wmmaB) {
+  auto warpsPerCTAA = wmmaA.getWarpsPerCTA();
+
+  auto warpsPerCTAB = wmmaB.getWarpsPerCTA();
+
+  if (warpsPerCTAA.size() != warpsPerCTAB.size()) {
+    return false;
+  }
+
+  auto rank = warpsPerCTAA.size();
+  for (size_t i = 0; i < rank; ++i) {
+    if (warpsPerCTAA[i] != warpsPerCTAB[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool isSharedEncoding(Value value) {
   auto type = value.getType();
   if (auto tensorType = type.dyn_cast<RankedTensorType>()) {

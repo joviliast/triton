@@ -53,6 +53,17 @@ mlir::OpTrait::impl::verifyOperandAndResultHaveSameEncoding(Operation *op) {
       return op->emitOpError()
              << "requires operand and result to have same layout";
     }
+  } else if (auto wmmaLayoutSrc =
+                 dyn_cast<triton::gpu::WmmaEncodingAttr>(operandLayout)) {
+    auto wmmaLayoutRes = dyn_cast<triton::gpu::WmmaEncodingAttr>(resultLayout);
+    if (!wmmaLayoutRes) {
+      return op->emitOpError()
+             << "requires operand and result to have same layout";
+    }
+    if (!triton::gpu::sameWmmaEncodings(wmmaLayoutSrc, wmmaLayoutRes)) {
+      return op->emitOpError()
+             << "requires operand and result to have same layout";
+    }
   } else {
     assert(false &&
            "Unexpected Layout in verifyOperandAndResultHaveSmeEncoding");

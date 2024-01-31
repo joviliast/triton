@@ -967,7 +967,7 @@ struct ViewSliceOpConversion
 
     auto srcTy = op.getSource().getType().dyn_cast<RankedTensorType>();
     if (srcTy.getEncoding().isa<BlockedEncodingAttr>() ||
-        srcTy.getEncoding().isa<MfmaEncodingAttr>()) {
+        srcTy.getEncoding().isa<MfmaEncodingAttr, WmmaEncodingAttr>()) {
       return processLayout(op, adaptor, rewriter);
     } else {
       assert(false && "Unsupported layout in viewSlice.");

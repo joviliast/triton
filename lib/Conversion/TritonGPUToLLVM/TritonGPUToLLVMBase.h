@@ -849,8 +849,9 @@ public:
       } else if (auto mfma = layout.dyn_cast<MfmaEncodingAttr>()) {
         result = 
             emitIndicesForDistributedLayout(loc, b, mfma, type, withCTAOffset);
-      } else if (layout.isa<WmmaEncodingAttr>()) {
-            assert(false);
+      } else if (auto wmma = layout.dyn_cast<WmmaEncodingAttr>()) {
+        result =
+            emitIndicesForDistributedLayout(loc, b, wmma, type, withCTAOffset);
       } else if (auto slice = layout.dyn_cast<SliceEncodingAttr>()) {
         result =
             emitIndicesForDistributedLayout(loc, b, slice, type, withCTAOffset);

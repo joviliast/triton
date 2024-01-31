@@ -110,6 +110,8 @@ bool sameBlockedEncodings(BlockedEncodingAttr blockedA,
 
 bool sameMfmaEncodings(MfmaEncodingAttr mfmaA, MfmaEncodingAttr mfmaB);
 
+bool sameWmmaEncodings(WmmaEncodingAttr wmmaA, WmmaEncodingAttr wmmaB);
+
 bool isSharedEncoding(Value value);
 
 bool isExpensiveCat(CatOp cat, Attribute targetEncoding);
