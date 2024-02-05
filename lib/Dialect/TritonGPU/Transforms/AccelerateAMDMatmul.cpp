@@ -329,14 +329,6 @@ public:
     if (!supportWMMA(dotOp))
       return failure();
 
-    // Not supported yet
-    //if (isChainDot(dotOp))
-    //  return failure();
-
-    // Not supported yet
-    //if (dotOp.getA().getType() != dotOp.getC().getType())
-    //  return failure();
-
     // get WMMA encoding for the given number of warps
     auto retShape = oldRetType.getShape();
     auto mod = op->getParentOfType<mlir::ModuleOp>();

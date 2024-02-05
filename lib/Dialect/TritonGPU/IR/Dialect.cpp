@@ -140,8 +140,8 @@ SmallVector<unsigned> getThreadsPerWarp(Attribute layout) {
   if (layout.isa<WmmaEncodingAttr>()) {
     // TODO: get rid of magic numbers
     constexpr int waveSize = 32;
-    return {WmmaEncodingAttr::getMNKDimPerWMMAInstr()[0],
-            waveSize / WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]};
+    return {waveSize / WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1],
+            WmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]};
   }
   if (auto sliceLayout = layout.dyn_cast<SliceEncodingAttr>()) {
     auto parent = sliceLayout.getParent();
@@ -652,6 +652,8 @@ SmallVector<unsigned> getCTAOrder(Attribute layout) {
   } else if (auto mmaLayout = layout.dyn_cast<MmaEncodingAttr>()) {
     ref = mmaLayout.getCTALayout().getCTAOrder();
 #ifdef USE_ROCM
+  } else if (layout.isa<MfmaEncodingAttr>()) {
+    return {0, 1};
   } else if (layout.isa<MfmaEncodingAttr, WmmaEncodingAttr>()) {
     return {0, 1};
 #endif
