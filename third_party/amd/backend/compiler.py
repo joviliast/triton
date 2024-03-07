@@ -24,7 +24,7 @@ class HIPOptions:
     enable_fp_fusion: bool = True
     capability: int = None
     # TODO:
-    matrix_core_version: int = -1
+    mfma_version: int = -1
     matrix_inst_shape: int = 0
     max_num_imprecise_acc_default: int = 0
 
@@ -39,7 +39,7 @@ class HIPOptions:
         return 64 # Default value
 
     @staticmethod
-    def get_matrix_core_version(arch: str) -> int:
+    def get_mfma_version(arch: str) -> int:
         """ Determine matrix core type available on current GPU.
             0 means no tensor cores are available
             1 corresponds to MFMA in CDNA 1 architecture
@@ -71,8 +71,8 @@ class HIPOptions:
         object.__setattr__(self, 'extern_libs', tuple(extern_libs.items()))
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
                "num_warps must be a power of 2"
-        if(self.matrix_core_version == -1):
-            object.__setattr__(self, 'matrix_core_version', self.get_matrix_core_version(self.arch))
+        if(self.mfma_version == -1):
+            object.__setattr__(self, 'mfma_version', self.get_mfma_version(self.arch))
 
     def hash(self):
         key = '_'.join([f'{name}-{val}' for name, val in self.__dict__.items()])
@@ -135,11 +135,11 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_coalesce(pm)
         amd.passes.ttgpuir.add_remove_layout_conversions(pm)
         passes.ttgpuir.add_optimize_thread_locality(pm)
-        amd.passes.ttgpuir.add_accelerate_matmul(pm, opt.matrix_core_version, opt.matrix_inst_shape)
+        amd.passes.ttgpuir.add_accelerate_matmul(pm, opt.arch, opt.matrix_inst_shape)
         amd.passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm)
-        if opt.num_stages == 0 and opt.matrix_core_version != 0:
+        if opt.num_stages == 0 and opt.mfma_version != 0:
             amd.passes.ttgpuir.add_stream_pipeline(pm)
             passes.common.add_canonicalizer(pm)
         passes.ttgpuir.add_optimize_dot_operands(pm)
