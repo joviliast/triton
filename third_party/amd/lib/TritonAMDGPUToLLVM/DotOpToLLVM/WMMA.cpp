@@ -60,7 +60,12 @@ getValuesFromDotOperandLayoutStruct(ConversionPatternRewriter &rewriter,
   ValueTable vals;
   for (int i = 0; i < n0; i++) {
     for (int j = 0; j < n1; j++) {
-      vals[{i, j}] = elems[n1 * i + j];
+      Type ty = vec_ty(type, kWidth);
+      Value rawElems = undef(ty);
+      for (int k = 0; k < kWidth; ++k) {
+        rawElems = insert_element(ty, rawElems,
+                                  elems[kWidth * (n1 * i + j) + k], i32_val(k));
+      }
     }
   }
   return vals;
@@ -151,7 +156,6 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto elemTy = aTensorTy.getElementType();
 
   auto aEncoding = aTensorTy.getEncoding().cast<DotOperandEncodingAttr>();
-  auto bEncoding = bTensorTy.getEncoding().cast<DotOperandEncodingAttr>();
   int kWidth = aEncoding.getKWidth();
 
   auto repA =
