@@ -54,7 +54,7 @@ using ValueTable = std::map<std::pair<unsigned, unsigned>, Value>;
 
 ValueTable
 getValuesFromDotOperandLayoutStruct(ConversionPatternRewriter &rewriter,
-                                    Value value, int n0, int n1, Type type,
+                                    Value value, int n0, int n1, int kWidth, Type type,
                                     Location loc) {
   auto elems = unpackLLElements(loc, value, rewriter);
   ValueTable vals;
@@ -63,9 +63,17 @@ getValuesFromDotOperandLayoutStruct(ConversionPatternRewriter &rewriter,
       Type ty = vec_ty(type, kWidth);
       Value rawElems = undef(ty);
       for (int k = 0; k < kWidth; ++k) {
-        rawElems = insert_element(ty, rawElems,
-                                  elems[kWidth * (n1 * i + j) + k], i32_val(k));
+        rawElems = insert_element(ty, rawElems, elems[kWidth * (n1 * i + j) + k], i32_val(k));
       }
+
+      Value convertedElems;
+      if (type.isBF16() || type.isF16()) {
+        convertedElems = rawElems;
+      } else {
+        assert(type.isInteger(8) || type.isInteger(4));
+        convertedElems = bitcast(rawElems, int_ty(type.getIntOrFloatBitWidth()));
+      }
+      vals[{i, j}] = convertedElems;
     }
   }
   return vals;
@@ -173,9 +181,9 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto numRepK = repA[1];
 
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
-      rewriter, loadedA, numRepM, numRepK, aTensorTy.getElementType(), loc);
+      rewriter, loadedA, numRepM, numRepK, kWidth, aTensorTy.getElementType(), loc);
   ValueTable hb = getValuesFromDotOperandLayoutStruct(
-      rewriter, loadedB, numRepN, numRepK, aTensorTy.getElementType(), loc);
+      rewriter, loadedB, numRepN, numRepK, kWidth, aTensorTy.getElementType(), loc);
   auto dstElemTy = dTensorTy.getElementType();
   auto fc = unpackLLElements(loc, loadedC, rewriter);
 
