@@ -48,6 +48,8 @@ public:
             dstDotOp.getParent() == srcMfmaEncoding)
           return;
       }
+      if (dstDotOp.getParent().isa<triton::gpu::MmaEncodingTrait>())
+        return;
       auto tmpType = triton::MemDescType::get(
           dstType.getShape(), dstType.getElementType(),
           triton::gpu::SharedEncodingAttr::get(
