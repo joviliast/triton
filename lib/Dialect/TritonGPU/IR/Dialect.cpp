@@ -808,12 +808,14 @@ AMDWmmaEncodingAttr::getElemsPerThread(ArrayRef<int64_t> shape,
 
   SmallVector<unsigned> elemsPerThread(rank);
   auto mnkDim = getMNKDimPerWMMAInstr();
+  auto instrPerStore = getInstrPerStore();
   auto elemsPerThreadPerTile = getSizePerThread();
   auto warpsPerCTA = getWarpsPerCTA();
-  return {ceil<unsigned>(shape[0], mnkDim[0] * warpsPerCTA[0]) *
-              elemsPerThreadPerTile[0],
-          ceil<unsigned>(shape[1], mnkDim[1] * warpsPerCTA[1]) *
-              elemsPerThreadPerTile[1]};
+  return {
+      ceil<unsigned>(shape[0], mnkDim[0] * instrPerStore[0] * warpsPerCTA[0]) *
+          elemsPerThreadPerTile[0],
+      ceil<unsigned>(shape[1], mnkDim[1] * instrPerStore[1] * warpsPerCTA[1]) *
+          elemsPerThreadPerTile[1]};
 }
 
 unsigned AMDWmmaEncodingAttr::getTotalElemsPerThread(ArrayRef<int64_t> shape,
@@ -1334,12 +1336,18 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
   if (parser.parseGreater().failed())
     return {};
 
+  SmallVector<unsigned> instrPerStore;
   SmallVector<unsigned> warpsPerCTA;
   std::optional<SmallVector<unsigned>> CTAsPerCGA;
   std::optional<SmallVector<unsigned>> CTASplitNum;
   std::optional<SmallVector<unsigned>> CTAOrder;
 
   for (const NamedAttribute &attr : dict) {
+    if (attr.getName() == "instrPerStore") {
+      if (parseIntArrayAttr(parser, attr, instrPerStore, "instrPerStore")
+              .failed())
+        return {};
+    }
     if (attr.getName() == "warpsPerCTA") {
       if (parseIntArrayAttr(parser, attr, warpsPerCTA, "warpsPerCTA").failed())
         return {};
@@ -1366,13 +1374,15 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
   if (!CTALayout.has_value())
     return {};
 
-  return parser.getChecked<AMDWmmaEncodingAttr>(parser.getContext(),
-                                                warpsPerCTA, *CTALayout);
+  return parser.getChecked<AMDWmmaEncodingAttr>(
+      parser.getContext(), instrPerStore, warpsPerCTA, *CTALayout);
 }
 
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
           << "warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]";
+  printer << "<{"
+          << "instrPerStore = [" << ArrayRef(getInstrPerStore()) << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getWarpsPerCTA().size());
   printer << "}>";
@@ -1559,7 +1569,7 @@ SmallVector<unsigned> AMDMfmaEncodingAttr::getSizePerThread() const {
   return res;
 }
 
-SmallVector<int64_t>
+SmallVector<unsigned>
 AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
   unsigned mDim = getMDim();
   unsigned nDim = getNDim();
@@ -1571,7 +1581,7 @@ AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
     kGroups = waveSize / mDim;
   if (mDim == 64 && nDim == 4 || mDim == 4 && nDim == 64)
     kGroups = 1;
-  int64_t kDim = kWidth * kGroups;
+  unsigned kDim = kWidth * kGroups;
   if (opIdx == 0)
     return {mDim, kDim};
   else
@@ -1579,27 +1589,27 @@ AMDMfmaEncodingAttr::getMFMAInstrShapeForOperands(int kWidth, int opIdx) const {
   return {kDim, nDim};
 }
 
-SmallVector<int64_t>
+SmallVector<unsigned>
 AMDMfmaEncodingAttr::getMFMARepForOperands(ArrayRef<int64_t> operandShape,
                                            int kWidth, int opIdx) const {
   auto operandTileShape = getMFMAInstrShapeForOperands(kWidth, opIdx);
   auto rank = operandShape.size();
   auto warpsPerCTA = getWarpsPerCTA();
-  int numRepBatch =
-      rank == 3 ? std::max<int64_t>(1, operandShape[0] / warpsPerCTA[0]) : 1;
+  unsigned numRepBatch =
+      rank == 3 ? std::max<unsigned>(1, operandShape[0] / warpsPerCTA[0]) : 1;
   if (opIdx == 0)
     return {
         numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] /
-                                 (operandTileShape[0] * warpsPerCTA[rank - 2])),
-        std::max<int64_t>(1, operandShape[rank - 1] / operandTileShape[1])};
+        std::max<unsigned>(1, operandShape[rank - 2] / (operandTileShape[0] *
+                                                        warpsPerCTA[rank - 2])),
+        std::max<unsigned>(1, operandShape[rank - 1] / operandTileShape[1])};
   else {
     assert(opIdx == 1);
-    return {
-        numRepBatch,
-        std::max<int64_t>(1, operandShape[rank - 2] / operandTileShape[0]),
-        std::max<int64_t>(1, operandShape[rank - 1] / (operandTileShape[1] *
-                                                       warpsPerCTA[rank - 1]))};
+    return {numRepBatch,
+            std::max<unsigned>(1, operandShape[rank - 2] / operandTileShape[0]),
+            std::max<unsigned>(
+                1, operandShape[rank - 1] /
+                       (operandTileShape[1] * warpsPerCTA[rank - 1]))};
   }
 }
 
@@ -1647,7 +1657,9 @@ AMDMfmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
 SmallVector<unsigned>
 AMDWmmaEncodingAttr::getShapePerCTATile(ArrayRef<int64_t> tensorShape) const {
   auto mnkDim = getMNKDimPerWMMAInstr();
-  return {mnkDim[0] * getWarpsPerCTA()[0], mnkDim[1] * getWarpsPerCTA()[1]};
+  auto instPerStore = getInstrPerStore();
+  return {mnkDim[0] * getWarpsPerCTA()[0] * instPerStore[0],
+          mnkDim[1] * getWarpsPerCTA()[1] * instPerStore[1]};
 }
 SmallVector<unsigned> AMDWmmaEncodingAttr::getCTAsPerCGA() const {
   return SmallVector<unsigned>(getCTALayout().getCTAsPerCGA());
@@ -1668,19 +1680,23 @@ SmallVector<unsigned> AMDWmmaEncodingAttr::getThreadOrder() const {
   return ::getOrder(*this);
 }
 SmallVector<unsigned> AMDWmmaEncodingAttr::getThreadsPerWarp() const {
-  return {getMNKDimPerWMMAInstr()[0] / getSizePerThread()[0],
-          getMNKDimPerWMMAInstr()[1] / getSizePerThread()[1]};
+  return {getMNKDimPerWMMAInstr()[0] * getInstrPerStore()[0] /
+              getSizePerThread()[0],
+          getMNKDimPerWMMAInstr()[1] * getInstrPerStore()[1] /
+              getSizePerThread()[1]};
 }
 
 SmallVector<unsigned> AMDWmmaEncodingAttr::getSizePerThread() const {
-  return {8, 1};
+  auto instrPerStore = getInstrPerStore();
+  return {8 * instrPerStore[0], 1 * instrPerStore[1]};
 }
 SmallVector<unsigned>
 AMDWmmaEncodingAttr::getSizePerThreadForOperands(unsigned opIdx) const {
+  auto instPerStore = getInstrPerStore()[opIdx];
   if (opIdx == 0) {
-    return {1, 16};
+    return {instPerStore, 16};
   } else if (opIdx == 1) {
-    return {16, 1};
+    return {16, instPerStore};
   } else {
     llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
   }
@@ -1702,29 +1718,38 @@ AMDWmmaEncodingAttr::getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape,
 unsigned AMDWmmaEncodingAttr::getTotalElemsPerThreadForOperands(
     ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const {
   auto rep = getWMMARepForOperands(shape, eltTy, kWidth, opIdx);
-  return rep[0] * rep[1] * kWidth;
+  return rep[0] * rep[1] * kWidth * getInstrPerStore()[opIdx];
 }
 
-SmallVector<int64_t>
-AMDWmmaEncodingAttr::getWMMAElemsPerInstrForOperands() const {
-  return {16, 16};
+SmallVector<unsigned> AMDWmmaEncodingAttr::getWMMAElemsPerInstructionForOperand(
+    unsigned opIdx) const {
+  if (opIdx == 0) {
+    return {16, 16};
+  } else if (opIdx == 1) {
+    return {16, 16};
+  } else {
+    llvm::report_fatal_error("DotOperandEncodingAttr opIdx must be 0 or 1");
+  }
 }
 
-SmallVector<int64_t>
+SmallVector<unsigned>
 AMDWmmaEncodingAttr::getWMMARepForOperands(ArrayRef<int64_t> operandShape,
                                            Type elemType, int kWidth,
                                            int opIdx) const {
-  auto operandTileShape = getWMMAElemsPerInstrForOperands();
+  auto operandTileShape = getWMMAElemsPerInstructionForOperand(opIdx);
+  auto instPerStore = getInstrPerStore();
   auto warpsPerCTA = getWarpsPerCTA();
   if (opIdx == 0)
-    return {std::max<int64_t>(1, operandShape[0] /
-                                     (operandTileShape[0] * warpsPerCTA[0])),
-            std::max<int64_t>(1, operandShape[1] / operandTileShape[1])};
+    return {std::max<unsigned>(1, operandShape[0] /
+                                      (operandTileShape[0] * instPerStore[0] *
+                                       warpsPerCTA[0])),
+            std::max<unsigned>(1, operandShape[1] / (operandTileShape[1]))};
   else {
     assert(opIdx == 1);
-    return {std::max<int64_t>(1, operandShape[0] / operandTileShape[0]),
-            std::max<int64_t>(1, operandShape[1] /
-                                     (operandTileShape[1] * warpsPerCTA[1]))};
+    return {std::max<unsigned>(1, operandShape[0] / (operandTileShape[0])),
+            std::max<unsigned>(1, operandShape[1] /
+                                      (operandTileShape[1] * instPerStore[1] *
+                                       warpsPerCTA[1]))};
   }
 }
 

@@ -41,23 +41,27 @@ bool isKMajor(llvm::ArrayRef<unsigned> order, int opIdx);
 
 using computeTensorElemMappingInBlockT =
     std::function<llvm::SmallVector<llvm::SmallVector<Value>>(
-        ConversionPatternRewriter &, Location, const ArrayRef<int64_t> &, Value,
-        Value, int, ArrayRef<int64_t>, ArrayRef<Value>, int, unsigned,
+        ConversionPatternRewriter &, Location, const ArrayRef<unsigned> &,
+        Value, Value, int, ArrayRef<unsigned>, ArrayRef<Value>, int, unsigned,
         unsigned)>;
 
-llvm::SmallVector<Value> computeOffsetsAType(
-    ConversionPatternRewriter &rewriter, Location loc,
-    computeTensorElemMappingInBlockT fn, const ArrayRef<int64_t> &elemsPerInstr,
-    Value warpId, Value laneId, int warpsPerBlock, int numOfElems,
-    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
-    gpu::SharedEncodingAttr srcLayout, unsigned nonKDim, unsigned kDim);
+llvm::SmallVector<Value>
+computeOffsetsAType(ConversionPatternRewriter &rewriter, Location loc,
+                    computeTensorElemMappingInBlockT fn,
+                    const ArrayRef<unsigned> &elemsPerInstr, Value warpId,
+                    Value laneId, int warpsPerBlock, int numOfElems,
+                    ArrayRef<unsigned> reps, SharedMemoryObject smemObj,
+                    gpu::SharedEncodingAttr srcLayout, unsigned nonKDim,
+                    unsigned instNum, unsigned kDim);
 
-llvm::SmallVector<Value> computeOffsetsBType(
-    ConversionPatternRewriter &rewriter, Location loc,
-    computeTensorElemMappingInBlockT fn, const ArrayRef<int64_t> &elemsPerInstr,
-    Value warpId, Value laneId, int warpsPerBlock, int numOfElems,
-    ArrayRef<int64_t> reps, SharedMemoryObject smemObj,
-    gpu::SharedEncodingAttr srcLayout, unsigned nonKDim, unsigned kDim);
+llvm::SmallVector<Value>
+computeOffsetsBType(ConversionPatternRewriter &rewriter, Location loc,
+                    computeTensorElemMappingInBlockT fn,
+                    const ArrayRef<unsigned> &elemsPerInstr, Value warpId,
+                    Value laneId, int warpsPerBlock, int numOfElems,
+                    ArrayRef<unsigned> reps, SharedMemoryObject smemObj,
+                    gpu::SharedEncodingAttr srcLayout, unsigned nonKDim,
+                    unsigned instNum, unsigned kDim);
 
 } // namespace mlir::triton::AMD
 

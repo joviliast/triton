@@ -112,7 +112,8 @@ createNewConvertOps(ModuleOp &mod, OpBuilder &builder,
   } else if (auto srcWmma = dyn_cast<triton::gpu::AMDWmmaEncodingAttr>(
                  srcType.getEncoding())) {
     auto newWmmaEnc = triton::gpu::AMDWmmaEncodingAttr::get(
-        mod.getContext(), {warpsPerCtaX, warpsPerCtaY}, srcWmma.getCTALayout());
+        mod.getContext(), srcWmma.getInstrPerStore(),
+        {warpsPerCtaX, warpsPerCtaY}, srcWmma.getCTALayout());
 
     newSrcType = RankedTensorType::get(srcType.getShape(),
                                        srcType.getElementType(), newWmmaEnc);

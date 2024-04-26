@@ -71,8 +71,8 @@ namespace SharedToDotOperandMFMA {
  */
 llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlock(
     ConversionPatternRewriter &rewriter, Location loc,
-    const ArrayRef<int64_t> &elemsPerInstr, Value waveId, Value laneId,
-    int numOfElems, ArrayRef<int64_t> reps, ArrayRef<Value> smemOffsets,
+    const ArrayRef<unsigned> &elemsPerInstr, Value waveId, Value laneId,
+    int numOfElems, ArrayRef<unsigned> reps, ArrayRef<Value> smemOffsets,
     int loadVecSize, unsigned iNonKDim, unsigned iKDim) {
   auto numM = reps[1];
   auto numK = reps[2];
@@ -139,9 +139,9 @@ bool hasSwizzleEnabled(const SharedEncodingAttr &srcEncoding) {
 // @param cSwizzleOffset
 llvm::SmallVector<Value>
 fastPathComputeOffsets(ConversionPatternRewriter &rewriter, Location loc,
-                       const ArrayRef<int64_t> &elemsPerInstr, Value waveId,
+                       const ArrayRef<unsigned> &elemsPerInstr, Value waveId,
                        Value laneId, int warpsPerBlock, int numOfElems,
-                       ArrayRef<int64_t> reps, Value cSwizzleOffset) {
+                       ArrayRef<unsigned> reps, Value cSwizzleOffset) {
   auto numK = reps[1];
   auto numN = reps[2];
   SmallVector<Value> offsets(numK * numN * numOfElems);
@@ -217,8 +217,8 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
   auto kWidth = encoding.getKWidth();
   auto elemsPerInstr = mfmaLayout.getMFMAInstrShapeForOperands(kWidth, opIdx);
 
-  int64_t mfmaInstrNonK;
-  int64_t mfmaInstrK;
+  unsigned mfmaInstrNonK;
+  unsigned mfmaInstrK;
   // TODO(Lixun): make it simpler
   // getMFMAInstrShapeForOperands always returns a 2D vector
   if (rank == 3) {
@@ -279,8 +279,8 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
     Value cSwizzleOffset = smemObj.getCSwizzleOffset(order[0]);
     if (opIdx == 0) {
       if (isColMajor(order)) {
-        SmallVector<int64_t> elemsPerInstr{mfmaInstrK, mfmaInstrNonK};
-        SmallVector<int64_t> reps{numReps[0], numReps[2], numReps[1]};
+        SmallVector<unsigned> elemsPerInstr{mfmaInstrK, mfmaInstrNonK};
+        SmallVector<unsigned> reps{numReps[0], numReps[2], numReps[1]};
         offsets = fastPathComputeOffsets(rewriter, loc, elemsPerInstr,
                                          spatialWaveId, lane, warpsPerBlockNonK,
                                          numOfElems, reps, cSwizzleOffset);
@@ -310,13 +310,13 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
       offsets = AMD::computeOffsetsAType(
           rewriter, loc, computeTensorElemMappingInBlock, elemsPerInstr,
           spatialWaveId, lane, warpsPerBlockNonK, numOfElems, numReps, smemObj,
-          sharedLayout, mDim, mfmaInstrK);
+          sharedLayout, 1, mDim, mfmaInstrK);
     } else {
       assert(opIdx == 1);
       offsets = AMD::computeOffsetsBType(
           rewriter, loc, computeTensorElemMappingInBlock, elemsPerInstr,
           spatialWaveId, lane, warpsPerBlockNonK, numOfElems, numReps, smemObj,
-          sharedLayout, nDim, mfmaInstrK);
+          sharedLayout, 1, nDim, mfmaInstrK);
     }
     smemBase = AMD::computeBasePtr(rewriter, loc, smemObj);
   }

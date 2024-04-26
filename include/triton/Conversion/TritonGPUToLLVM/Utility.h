@@ -909,9 +909,7 @@ emitOffsetForMfmaLayout(const AMDMfmaEncodingAttr &mfmaLayout,
 inline void emitWmmaOffsetForCTA(const AMDWmmaEncodingAttr &wmmaLayout,
                                  SmallVector<SmallVector<unsigned>> &offsets,
                                  unsigned ctaOffsetX, unsigned ctaOffsetY) {
-  const unsigned elemsPerThreadPerGroup = 8;
-  auto warpSize = getWarpSize(wmmaLayout);
-  assert(warpSize == 32);
+  const unsigned elemsPerThreadPerGroup = 8 * wmmaLayout.getInstrPerStore()[0];
   auto shapePerCta = getShapePerCTATile(wmmaLayout);
   for (unsigned elem = 0; elem < elemsPerThreadPerGroup; elem++) {
     offsets.push_back(
@@ -929,6 +927,7 @@ emitBaseIndexForWmmaLayout(Location loc, RewriterBase &rewriter,
   SmallVector<Value> warpsPerCTA = {i32_val(_warpsPerCTA[0]),
                                     i32_val(_warpsPerCTA[1])};
   auto mnkDim = AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr();
+  auto instrPerStore = wmmaLayout.getInstrPerStore();
 
   Value threadId = getThreadId(rewriter, loc);
   Value warpSize = i32_val(triton::gpu::getWarpSize(wmmaLayout));
@@ -940,18 +939,22 @@ emitBaseIndexForWmmaLayout(Location loc, RewriterBase &rewriter,
   SmallVector<Value> multiDimWarpId =
       delinearize(rewriter, loc, warpId, _warpsPerCTA,
                   triton::gpu::getWarpOrder(wmmaLayout));
-  if (shape[0] >= mnkDim[0]) {
+  if (shape[0] >= mnkDim[0] * instrPerStore[0]) {
     assert(shape[0] % mnkDim[0] == 0);
     multiDimWarpId[0] =
-        urem(multiDimWarpId[0], i32_val(ceil<unsigned>(shape[0], mnkDim[0])));
+        urem(multiDimWarpId[0],
+             i32_val(ceil<unsigned>(shape[0], mnkDim[0] * instrPerStore[0])));
   }
-  if (shape[1] >= mnkDim[1]) {
+  if (shape[1] >= mnkDim[1] * instrPerStore[0]) {
     assert(shape[1] % mnkDim[1] == 0);
     multiDimWarpId[1] =
-        urem(multiDimWarpId[1], i32_val(ceil<unsigned>(shape[1], mnkDim[1])));
+        urem(multiDimWarpId[1],
+             i32_val(ceil<unsigned>(shape[1], mnkDim[1] * instrPerStore[1])));
   }
-  Value offWarp0 = mul(multiDimWarpId[0], i32_val(mnkDim[0]));
-  Value offWarp1 = mul(multiDimWarpId[1], i32_val(mnkDim[1]));
+  Value offWarp0 =
+      mul(multiDimWarpId[0], i32_val(mnkDim[0] * instrPerStore[0]));
+  Value offWarp1 =
+      mul(multiDimWarpId[1], i32_val(mnkDim[1] * instrPerStore[1]));
   return {add(udiv(threadIdPerWarp, i32_val(mnkDim[2])), offWarp0),
           add(laneId, offWarp1)};
 }
@@ -963,13 +966,14 @@ emitOffsetForWmmaLayout(const AMDWmmaEncodingAttr &wmmaLayout,
   SmallVector<SmallVector<unsigned>> offsets;
   auto shapePerCTA = getShapePerCTA(wmmaLayout, tensorShape);
   auto warpsPerCTA = wmmaLayout.getWarpsPerCTA();
+  auto instrPerStore = wmmaLayout.getInstrPerStore();
 
   SmallVector<unsigned> numWarpsPerDim(2);
   auto mnkDim = AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr();
   for (unsigned d = 0; d < 2; ++d) {
     unsigned inPerCTA = std::min<unsigned>(tensorShape[d], shapePerCTA[d]);
     unsigned inPerWarp = ceil<unsigned>(inPerCTA, warpsPerCTA[d]);
-    numWarpsPerDim[d] = ceil<unsigned>(inPerWarp, mnkDim[d]);
+    numWarpsPerDim[d] = ceil<unsigned>(inPerWarp, mnkDim[d] * instrPerStore[d]);
   }
 
   for (unsigned i = 0; i < numWarpsPerDim[0]; ++i) {
@@ -1192,8 +1196,14 @@ emitIndices(Location loc, RewriterBase &rewriter, const TargetInfoBase &target,
   SmallVector<SmallVector<Value>> multiDimIdx(elemsPerThread,
                                               SmallVector<Value>(rank));
   for (unsigned n = 0; n < elemsPerThread; ++n)
-    for (unsigned k = 0; k < rank; ++k)
+    for (unsigned k = 0; k < rank; ++k) {
       multiDimIdx[n][k] = add(multiDimBase[k], i32_val(offset[n][k]));
+      /*      if (mlir::dyn_cast<AMDWmmaEncodingAttr>(layout))
+              printValues(loc, rewriter,
+                          "A[" + std::to_string(n) + "][" + std::to_string(k) +
+         "]", {multiDimIdx[n][k]});*/
+    }
+  // printValues(loc, rewriter, "A[", {tid_val()});
 
   return multiDimIdx;
 }

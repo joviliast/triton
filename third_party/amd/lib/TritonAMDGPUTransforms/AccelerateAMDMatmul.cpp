@@ -541,21 +541,23 @@ public:
     auto oldAType = cast<RankedTensorType>(a.getType());
     auto oldBType = cast<RankedTensorType>(b.getType());
     auto ctx = oldAType.getContext();
+    auto oldRetElemType = oldRetType.getElementType();
 
     AMDWmmaEncodingAttr wmmaEnc;
 
     auto mnkDim = AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr();
     auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
-    // Not supported yet
-    // if (retShape[0] < warpsPerTile[0] * mnkDim[0] || retShape[1] <
-    // warpsPerTile[1] * mnkDim[1])
-    //  return failure();
+
+    const unsigned vgprWidth = 32;
     auto CTALayout = ttg::getCTALayout(oldRetType.getEncoding());
-    wmmaEnc = AMDWmmaEncodingAttr::get(oldRetType.getContext(), warpsPerTile,
-                                       CTALayout);
+
+    auto numMInstr = retShape[0] % vgprWidth == 0
+                         ? vgprWidth / oldRetElemType.getIntOrFloatBitWidth()
+                         : 1;
+    wmmaEnc = AMDWmmaEncodingAttr::get(oldRetType.getContext(), {numMInstr, 1},
+                                       warpsPerTile, CTALayout);
 
     Type wmmaAccType;
-    auto oldRetElemType = oldRetType.getElementType();
     auto aElemType = oldAType.getElementType();
     auto bElemType = oldBType.getElementType();
     if (oldRetElemType.isIntOrIndex()) {

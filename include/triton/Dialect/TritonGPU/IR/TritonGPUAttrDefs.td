@@ -909,8 +909,8 @@ V [ 0,4,8...60   1,5...61     2,6...62     3,7...63    ]   [ 128,132...188  129,
     SmallVector<unsigned> getSizePerThreadForOperands(unsigned opIdx) const;
     SmallVector<unsigned> getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape, int opIdx) const;
     unsigned getTotalElemsPerThreadForOperands(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
-    SmallVector<int64_t> getMFMAInstrShapeForOperands(int kWidth, int opIdx) const;
-    SmallVector<int64_t> getMFMARepForOperands(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
+    SmallVector<unsigned> getMFMAInstrShapeForOperands(int kWidth, int opIdx) const;
+    SmallVector<unsigned> getMFMARepForOperands(ArrayRef<int64_t> operandShape, int kWidth, int opIdx) const;
 
     SmallVector<unsigned> getContigPerThread() {
       auto rank = getWarpsPerCTA().size();
@@ -964,6 +964,7 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
 
   let parameters = (
     ins
+    ArrayRefParameter<"unsigned">:$instrPerStore,
     ArrayRefParameter<"unsigned">:$warpsPerCTA__,
     "CTALayoutAttr":$CTALayout
   );
@@ -977,8 +978,8 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
     SmallVector<unsigned> getSizePerThreadForOperands(unsigned opIdx) const;
     SmallVector<unsigned> getShapePerCTATileForDotOperands(ArrayRef<int64_t> shape, int opIdx) const;
     unsigned getTotalElemsPerThreadForOperands(ArrayRef<int64_t> shape, Type eltTy, int kWidth, int opIdx) const;
-    SmallVector<int64_t> getWMMAElemsPerInstrForOperands() const;
-    SmallVector<int64_t> getWMMARepForOperands(ArrayRef<int64_t> operandShape,
+    SmallVector<unsigned> getWMMAElemsPerInstructionForOperand(unsigned opIdx) const;
+    SmallVector<unsigned> getWMMARepForOperands(ArrayRef<int64_t> operandShape,
                                       Type elemType, int kWidth, int opIdx) const;
     static SmallVector<unsigned> getMNKDimPerWMMAInstr();
 

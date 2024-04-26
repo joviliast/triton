@@ -45,32 +45,62 @@ enum class WMMAInstrType : uint8_t {
   NOT_APPLICABLE,
 };
 
-using ValueTable = std::map<std::pair<unsigned, unsigned>, Value>;
+static void printValues(Location loc, RewriterBase &rewriter,
+                        std::string prefix, const SmallVector<Value> &vs) {
+  auto ctx = loc.getContext();
+  std::vector<Value> values;
+  for (const auto &v : vs) {
+    auto vTy = v.getType();
+    if (auto vecTy = dyn_cast<VectorType>(vTy)) {
+      auto elemTy = vecTy.getElementType();
+      for (int i = 0; i < vecTy.getNumElements(); ++i) {
+        values.push_back(extract_element(elemTy, v, i32_val(i)));
+      }
+    } else if (mlir::isa<LLVM::LLVMPointerType>(vTy)) {
+      values.push_back(ptrtoint(i32_ty, v));
+    } else {
+      values.push_back(v);
+    }
+  }
+  auto prefixAttr = mlir::StringAttr::get(ctx, prefix);
+  rewriter.create<triton::PrintOp>(loc, prefixAttr, false, values);
+}
+using ValueTable = std::map<std::pair<unsigned, unsigned>, SmallVector<Value>>;
 
-ValueTable getValuesFromDotOperandLayoutStruct(
-    ConversionPatternRewriter &rewriter, const LLVMTypeConverter *typeConverter,
-    Value value, int n0, int n1, int kWidth, Type type, Location loc) {
+ValueTable
+getValuesFromDotOperandLayoutStruct(ConversionPatternRewriter &rewriter,
+                                    const LLVMTypeConverter *typeConverter,
+                                    Value value, int n0, int numInstr, int n1,
+                                    int kWidth, Type type, Location loc) {
   auto elems = unpackLLElements(loc, value, rewriter);
+  if (numInstr == 2) {
+    // printValues(loc, rewriter, "a00", elems);
+  }
   ValueTable vals;
   for (int i = 0; i < n0; i++) {
     for (int j = 0; j < n1; j++) {
-      Type elemTy = typeConverter->convertType(type);
-      Type ty = vec_ty(elemTy, kWidth);
-      Value rawElems = undef(ty);
-      for (int k = 0; k < kWidth; ++k) {
-        rawElems = insert_element(ty, rawElems,
-                                  elems[kWidth * (n1 * i + j) + k], i32_val(k));
-      }
+      for (int instrIdx = 0; instrIdx < numInstr; ++instrIdx) {
+        Type elemTy = typeConverter->convertType(type);
+        Type ty = vec_ty(elemTy, kWidth);
+        Value rawElems = undef(ty);
+        for (int k = 0; k < kWidth; ++k) {
+          rawElems = insert_element(
+              ty, rawElems,
+              elems[i * n1 * numInstr * kWidth + j * numInstr * kWidth +
+                    instrIdx * kWidth + k],
+              i32_val(k));
+        }
 
-      Value convertedElems;
-      if (type.isBF16() || type.isF16()) {
-        convertedElems = rawElems;
-      } else {
-        convertedElems = bitcast(
-            rawElems, vec_ty(i32_ty, kWidth * type.getIntOrFloatBitWidth() /
-                                         i32_ty.getIntOrFloatBitWidth()));
+        Value convertedElems;
+        if (type.isBF16() || type.isF16()) {
+          convertedElems = rawElems;
+        } else {
+          convertedElems = bitcast(
+              rawElems, vec_ty(i32_ty, kWidth * type.getIntOrFloatBitWidth() /
+                                           i32_ty.getIntOrFloatBitWidth()));
+        }
+        vals[{i, j}].push_back(convertedElems);
       }
-      vals[{i, j}] = convertedElems;
     }
   }
   return vals;
@@ -110,9 +140,9 @@ static WMMAInstrType getWMMAInstrTypeFromDot(DotOp op) {
 
 Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
                      WMMAInstrType wmmaType, Value valA, Value valB, Value valC,
-                     Type aElType, Type bElType) {
+                     Type aElType, Type bElType, bool lowBits) {
   auto resType = valC.getType();
-  Value falseFlag = int_val(1, false);
+  Value bitsFlag = int_val(1, lowBits);
   switch (wmmaType) {
   case WMMAInstrType::FP32_FP16:
     return rewriter.create<ROCDL::wmma_f32_16x16x16_f16>(
@@ -122,22 +152,22 @@ Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
         loc, TypeRange{resType}, ValueRange{valA, valB, valC});
   case WMMAInstrType::FP16_FP16:
     return rewriter.create<ROCDL::wmma_f16_16x16x16_f16>(
-        loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+        loc, TypeRange{resType}, ValueRange{valA, valB, valC, bitsFlag});
   case WMMAInstrType::BF16_BF16:
     return rewriter.create<ROCDL::wmma_bf16_16x16x16_bf16>(
-        loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+        loc, TypeRange{resType}, ValueRange{valA, valB, valC, bitsFlag});
   case WMMAInstrType::INT32_IU8:
     return rewriter.create<ROCDL::wmma_i32_16x16x16_iu8>(
         loc, TypeRange{resType},
         ValueRange{int_val(1, !aElType.isUnsignedInteger()), valA,
                    int_val(1, !bElType.isUnsignedInteger()), valB, valC,
-                   falseFlag});
+                   bitsFlag});
   case WMMAInstrType::INT32_IU4:
     return rewriter.create<ROCDL::wmma_i32_16x16x16_iu4>(
         loc, TypeRange{resType},
         ValueRange{int_val(1, !aElType.isUnsignedInteger()), valA,
                    int_val(1, !bElType.isUnsignedInteger()), valB, valC,
-                   falseFlag});
+                   bitsFlag});
   default:
     llvm::report_fatal_error("WMMA data type not supported");
   }
@@ -182,10 +212,12 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto numRepK = repA[1];
 
   ValueTable ha = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedA, numRepM, numRepK, kWidth,
+      rewriter, typeConverter, loadedA, numRepM,
+      wmmaLayout.getInstrPerStore()[0], numRepK, kWidth,
       aTensorTy.getElementType(), loc);
   ValueTable hb = getValuesFromDotOperandLayoutStruct(
-      rewriter, typeConverter, loadedB, numRepN, numRepK, kWidth,
+      rewriter, typeConverter, loadedB, numRepN,
+      wmmaLayout.getInstrPerStore()[1], numRepK, kWidth,
       aTensorTy.getElementType(), loc);
   auto dstElemTy = dTensorTy.getElementType();
   auto fc = unpackLLElements(loc, loadedC, rewriter);
@@ -198,31 +230,59 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   // compute number of output elements that each thread holds for one WMMA
   // instruction.
   auto elemsPerVec = mnkDim[0] * mnkDim[1] * paddedOutputElemSize / warpSize;
-  auto dElemsToStorePerThread = mnkDim[0] * mnkDim[1] / warpSize;
+  auto instPerStore = product(wmmaLayout.getInstrPerStore());
+  auto dElemsToStorePerThreadPerInstr = mnkDim[0] * mnkDim[1] / warpSize;
   auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+  int barrierMask = 0;
   for (int m = 0; m < numRepM; ++m) {
+    if (m == 1) {
+      // printValues(loc, rewriter, "a00", {ha[{m, 0}][0]});
+      // printValues(loc, rewriter, "a01", {ha[{m, 0}][1]});
+      // printValues(loc, rewriter, "a10", {ha[{m, 1}][0]});
+      // printValues(loc, rewriter, "a11", {ha[{m, 1}][1]});
+    }
     for (int n = 0; n < numRepN; ++n) {
-      Value acc = undef(vecTy);
-      for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-        acc = insert_element(vecTy, acc,
-                             fc[m * numRepN * dElemsToStorePerThread +
-                                n * dElemsToStorePerThread + v],
-                             i32_val(v * paddedOutputElemSize));
+      SmallVector<Value> acc(instPerStore, undef(vecTy));
+      for (int i = 0; i < instPerStore; ++i) {
+        for (unsigned v = 0; v < dElemsToStorePerThreadPerInstr; ++v) {
+          acc[i] = insert_element(
+              vecTy, acc[i],
+              fc[m * numRepN * instPerStore * dElemsToStorePerThreadPerInstr +
+                 n * instPerStore * dElemsToStorePerThreadPerInstr +
+                 i * dElemsToStorePerThreadPerInstr + v],
+              i32_val(v * instPerStore + i));
+        }
       }
-      for (size_t k = 0; k < numRepK; k++) {
-        acc = generateWMMAOp(rewriter, loc, wmmaInstrType, ha[{m, k}],
-                             hb[{n, k}], acc, aTensorTy.getElementType(),
-                             bTensorTy.getElementType());
+      for (size_t k = 0; k < numRepK; ++k) {
+        for (int i = 0; i < instPerStore; ++i) {
+          acc[i] =
+              generateWMMAOp(rewriter, loc, wmmaInstrType, ha[{m, k}][i],
+                             hb[{n, k}][0], acc[i], aTensorTy.getElementType(),
+                             bTensorTy.getElementType(), i % 2 == 1);
+        }
+        // printValues(loc, rewriter, "HB", {hb[{n, k}][0]});
+        /*if (k == 0) {
+          rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt,
+        barrierMask++); for (int z = 0; z < 256; ++z) barrier();
+          rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt,
+        barrierMask++);
+        }*/
       }
-      for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-        fc[m * numRepN * dElemsToStorePerThread + n * dElemsToStorePerThread +
-           v] =
-            extract_element(dstElemTy, acc, i32_val(v * paddedOutputElemSize));
+      for (int i = 0; i < instPerStore; ++i) {
+        for (int v = 0; v < dElemsToStorePerThreadPerInstr; ++v) {
+          fc[m * numRepN * instPerStore * dElemsToStorePerThreadPerInstr +
+             n * instPerStore * dElemsToStorePerThreadPerInstr +
+             i * dElemsToStorePerThreadPerInstr + v] =
+              extract_element(dstElemTy, acc[i], i32_val(v * instPerStore + i));
+        }
       }
+      // printValues(loc, rewriter, "FC", fc);
     }
   }
-
-  // replace with new packed result
+  // printValues(loc, rewriter, "acc", fc);
+  // printValues(loc, rewriter, "acc", fc);
+  // printValues(loc, rewriter, "acc", fc);
+  //  replace with new packed result
   Type structTy = LLVM::LLVMStructType::getLiteral(
       wmmaLayout.getContext(), SmallVector<Type>(fc.size(), dstElemTy));
   Value res = packLLElements(loc, typeConverter, fc, rewriter, structTy);

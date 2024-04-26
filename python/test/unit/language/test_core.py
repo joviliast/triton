@@ -3167,6 +3167,7 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
     pgm = kernel[(1, 1)](x_tri, x_tri.stride(0), x_tri.stride(1), y_tri, y_tri.stride(0), y_tri.stride(1), w_tri,
                          w_tri.stride(0), w_tri.stride(1), z_tri, z_tri.stride(0), z_tri.stride(1), **kern_kwargs)
 
+    torch.set_printoptions(profile="full")
     if epilogue == 'softmax' and (in_dtype != 'float32' or input_precision == "tf32"):
         if not is_cuda():
             pass
@@ -3207,6 +3208,21 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
             w = to_numpy(convert_fp8_to_fp32(w, device, in_dtype))
         z_ref = np.matmul(z_ref, w)
     # compare
+
+    import sys
+    torch.set_printoptions(profile="full")
+    np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
+    print("A")
+    print(x_tri)
+    print("B")
+    print(y_tri)
+    print("Diff")
+    print(np.isclose(to_numpy(z_tri), z_ref, atol=1e-02))
+    print("tri")
+    print(to_numpy(z_tri))
+    print("ref")
+    print(z_ref)
+    print("AAA")
     if in_dtype == 'float32':
         # XXX: Somehow there's a larger difference when we use float32
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
