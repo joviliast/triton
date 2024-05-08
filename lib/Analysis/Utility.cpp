@@ -585,12 +585,13 @@ bool isMfmaToDotShortcut(RankedTensorType &srcTy, RankedTensorType &dstTy) {
   // TODO: Remove the restriction on the warpsPerCTA once chain dot testing is
   // improved. In addition, we can enable this shortcut for regular MFMA
   // layout when opIdx == 1.
-  return mfmaLayout.getWarpsPerCTA()[1] == 1 &&
-         dotOperandLayout.getOpIdx() == 0 && mfmaLayout.getIsTransposed() &&
-         dotOperandLayout.getKWidth() == getContigPerThread(mfmaLayout)[1] &&
-         dotOperandLayout.getParent() == mfmaLayout &&
-         (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
-         (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
+  return false;
+  // return mfmaLayout.getWarpsPerCTA()[1] == 1 &&
+  //        dotOperandLayout.getOpIdx() == 0 && mfmaLayout.getIsTransposed() &&
+  //        dotOperandLayout.getKWidth() == getContigPerThread(mfmaLayout)[1] &&
+  //        dotOperandLayout.getParent() == mfmaLayout &&
+  //        (mfmaLayout.getMDim() == 32 || mfmaLayout.getMDim() == 16) &&
+  //        (srcTy.getElementType().isF16() || srcTy.getElementType().isBF16());
 }
 
 static bool isMmaToMmaShortcut(Attribute srcEncoding, Attribute dstEncoding) {
