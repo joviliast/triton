@@ -32,6 +32,26 @@ using ::mlir::triton::gpu::SharedEncodingAttr;
 
 namespace SharedToDotOperandWMMA {
 
+static void printValues(Location loc, RewriterBase &rewriter,
+                        std::string prefix, const SmallVector<Value> &vs) {
+  auto ctx = loc.getContext();
+  std::vector<Value> values;
+  for (const auto &v : vs) {
+    auto vTy = v.getType();
+    if (auto vecTy = dyn_cast<VectorType>(vTy)) {
+      auto elemTy = vecTy.getElementType();
+      for (int i = 0; i < vecTy.getNumElements(); ++i) {
+        values.push_back(extract_element(elemTy, v, i32_val(i)));
+      }
+    } else if (mlir::isa<LLVM::LLVMPointerType>(vTy)) {
+      values.push_back(ptrtoint(i32_ty, v));
+    } else {
+      values.push_back(v);
+    }
+  }
+  auto prefixAttr = mlir::StringAttr::get(ctx, prefix);
+  rewriter.create<triton::PrintOp>(loc, prefixAttr, false, values);
+}
 /**
  * @brief This function maps particular load of wmma dot operand to element
  * indexes(row, col)
@@ -74,7 +94,6 @@ llvm::SmallVector<llvm::SmallVector<Value>> computeTensorElemMappingInBlock(
   const int instNum = numOfElems / iNonKDim;
   const int loadsPerInstr = loadsPerThread / instNum;
   llvm::SmallVector<llvm::SmallVector<Value>> mapping(numK * loadsPerThread);
-
   Value warpVOffset = mul(warpId, i32_val(numOfElems));
   Value sliceVOffset = add(laneId, warpVOffset);
   Value rowBase = add(sliceVOffset, smemOffsets[0]);
@@ -183,9 +202,6 @@ Value convertLayout(int opIdx, ConversionPatternRewriter &rewriter,
         }
       }
     }
-  }
-  if (opIdx == 0) {
-    //    assert(false);
   }
   MLIRContext *ctx = wmmaLayout.getContext();
   Type structTy = LLVM::LLVMStructType::getLiteral(

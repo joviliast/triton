@@ -1380,9 +1380,8 @@ Attribute AMDWmmaEncodingAttr::parse(AsmParser &parser, Type type) {
 
 void AMDWmmaEncodingAttr::print(AsmPrinter &printer) const {
   printer << "<{"
-          << "warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "]";
-  printer << "<{"
-          << "instrPerStore = [" << ArrayRef(getInstrPerStore()) << "]";
+          << "warpsPerCTA = [" << ArrayRef(getWarpsPerCTA()) << "], ";
+  printer << "instrPerStore = [" << ArrayRef(getInstrPerStore()) << "]";
   maybePrintCTALayout(getContext(), printer, getCTALayout(),
                       /*rank=*/getWarpsPerCTA().size());
   printer << "}>";

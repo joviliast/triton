@@ -235,12 +235,6 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto vecTy = vec_ty(dstElemTy, elemsPerVec);
   int barrierMask = 0;
   for (int m = 0; m < numRepM; ++m) {
-    if (m == 1) {
-      // printValues(loc, rewriter, "a00", {ha[{m, 0}][0]});
-      // printValues(loc, rewriter, "a01", {ha[{m, 0}][1]});
-      // printValues(loc, rewriter, "a10", {ha[{m, 1}][0]});
-      // printValues(loc, rewriter, "a11", {ha[{m, 1}][1]});
-    }
     for (int n = 0; n < numRepN; ++n) {
       SmallVector<Value> acc(instPerStore, undef(vecTy));
       for (int i = 0; i < instPerStore; ++i) {
@@ -250,7 +244,7 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
               fc[m * numRepN * instPerStore * dElemsToStorePerThreadPerInstr +
                  n * instPerStore * dElemsToStorePerThreadPerInstr +
                  i * dElemsToStorePerThreadPerInstr + v],
-              i32_val(v * instPerStore + i));
+              i32_val(v * paddedOutputElemSize + i));
         }
       }
       for (size_t k = 0; k < numRepK; ++k) {
@@ -260,23 +254,16 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
                              hb[{n, k}][0], acc[i], aTensorTy.getElementType(),
                              bTensorTy.getElementType(), i % 2 == 1);
         }
-        // printValues(loc, rewriter, "HB", {hb[{n, k}][0]});
-        /*if (k == 0) {
-          rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt,
-        barrierMask++); for (int z = 0; z < 256; ++z) barrier();
-          rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt,
-        barrierMask++);
-        }*/
       }
       for (int i = 0; i < instPerStore; ++i) {
         for (int v = 0; v < dElemsToStorePerThreadPerInstr; ++v) {
           fc[m * numRepN * instPerStore * dElemsToStorePerThreadPerInstr +
              n * instPerStore * dElemsToStorePerThreadPerInstr +
              i * dElemsToStorePerThreadPerInstr + v] =
-              extract_element(dstElemTy, acc[i], i32_val(v * instPerStore + i));
+              extract_element(dstElemTy, acc[i],
+                              i32_val(v * paddedOutputElemSize + i));
         }
       }
-      // printValues(loc, rewriter, "FC", fc);
     }
   }
   // printValues(loc, rewriter, "acc", fc);

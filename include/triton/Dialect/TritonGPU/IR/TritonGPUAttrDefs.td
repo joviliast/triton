@@ -935,13 +935,14 @@ An encoding for tensors that have been produced by WMMA instructions,
 available on RDNA 3.
 A `warpsPerCTA` parameter characterizes data distribution between waves.
 An important limitation of WMMA for layout is a shape for tiles proccessed
-by a single wave. It is [16, 16].
+by a single wave. It is [16 * instrPerStore[0], 16 * instrPerStore[1].
 This encoding assumes specific access to matrix elements by threads.
 
 Example:
-Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
+Suppose we have a tensor with shape [64, 48], `warpsPerCTA` set to [2, 3],
+`instrPerStore` set to [2, 1].
 
-    wave 0 [16, 16]           wave 1 [16, 16]           wave 2 [16, 16]
+    wave 0 [32, 16]           wave 1 [32, 16]           wave 2 [32, 16]
 -----------/\----------   -----------/\----------   -----------/\----------
 [0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
 [16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
@@ -951,7 +952,7 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
 [0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
 [16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
 
-    wave 3 [16, 16]           wave 4 [16, 16]           wave 5 [16, 16]
+    wave 3 [32, 16]           wave 4 [32, 16]           wave 5 [32, 16]
 -----------/\----------   -----------/\----------   -----------/\----------
 [0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
 [16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
@@ -961,7 +962,6 @@ Suppose we have a tensor with shape [32, 48], `warpsPerCTA` set to [2, 3].
 [0   1   2  ... 14  15]   [0   1   2  ... 14  15]   [0   1   2  ... 14  15]
 [16  17  18 ... 30  31]   [16  17  18 ... 30  31]   [16  17  18 ... 30  31]
   }];
-
   let parameters = (
     ins
     ArrayRefParameter<"unsigned">:$instrPerStore,

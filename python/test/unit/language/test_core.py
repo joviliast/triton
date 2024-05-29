@@ -180,11 +180,12 @@ class MfmaLayout:
 
 class WmmaLayout:
 
-    def __init__(self, warps_per_cta):
+    def __init__(self, instr_per_store, warps_per_cta):
+        self.instr_per_store = instr_per_store
         self.warps_per_cta = warps_per_cta
 
     def __str__(self):
-        return f"#{GPU_DIALECT}.amd_wmma<{{warpsPerCTA = {self.warps_per_cta}}}>"
+        return f"#{GPU_DIALECT}.amd_wmma<{{instrPerStore = {self.instr_per_store}, warpsPerCTA = {self.warps_per_cta}}}>"
 
 
 class MmaLayout:
@@ -2536,9 +2537,12 @@ layouts = [
     MfmaLayout(version=(2, 0), warps_per_cta=[2, 2], instr_shape=[32, 32], is_transposed=True),
     MfmaLayout(version=(2, 0), warps_per_cta=[4, 1], instr_shape=[32, 32], is_transposed=True),
     MfmaLayout(version=(2, 0), warps_per_cta=[1, 4], instr_shape=[32, 32], is_transposed=True),
-    WmmaLayout(warps_per_cta=[2, 2]),
-    WmmaLayout(warps_per_cta=[4, 1]),
-    WmmaLayout(warps_per_cta=[1, 4]),
+    WmmaLayout(instr_per_store=[1, 1], warps_per_cta=[2, 2]),
+    WmmaLayout(instr_per_store=[1, 1], warps_per_cta=[4, 1]),
+    WmmaLayout(instr_per_store=[1, 1], warps_per_cta=[1, 4]),
+    WmmaLayout(instr_per_store=[2, 1], warps_per_cta=[2, 2]),
+    WmmaLayout(instr_per_store=[2, 1], warps_per_cta=[4, 1]),
+    WmmaLayout(instr_per_store=[2, 1], warps_per_cta=[1, 4]),
 ]
 
 
@@ -2554,6 +2558,9 @@ def test_reduce_layouts(M, N, src_layout, axis, epilogue_kind, dtype_str, reduce
         pytest.skip("Skipping because tensor shape is smaller than M(f)maLayout instr_shape")
     if is_hip() and isinstance(src_layout, MfmaLayout) and ((M, N) == (128, 128)):
         pytest.skip("Skipping test because it runs out of shared memory")
+    if is_hip() and isinstance(src_layout, WmmaLayout) and (M < src_layout.instr_per_store[0] * 16
+                                                            or N < src_layout.instr_per_store[1] * 16):
+        pytest.skip("Skipping test because layout is not applicable for given shape")
     if reduce_op == "sum" and dtype_str == "float16" and M * N > 1024:
         pytest.skip("Skipping sum reduction on float16 due to accuracy issues")
     if epilogue_kind == 'expand_reduce2d' and isinstance(src_layout, MmaLayout):
@@ -3212,17 +3219,17 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
     import sys
     torch.set_printoptions(profile="full")
     np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
-    print("A")
-    print(x_tri)
-    print("B")
-    print(y_tri)
-    print("Diff")
-    print(np.isclose(to_numpy(z_tri), z_ref, atol=1e-02))
-    print("tri")
-    print(to_numpy(z_tri))
-    print("ref")
-    print(z_ref)
-    print("AAA")
+    #print("A")
+    #print(x_tri)
+    #print("B")
+    #print(y_tri)
+    #print("Diff")
+    #print(np.isclose(to_numpy(z_tri), z_ref, atol=1e-02))
+    #print("tri")
+    #print(to_numpy(z_tri))
+    #print("ref")
+    #print(z_ref)
+    #print("AAA")
     if in_dtype == 'float32':
         # XXX: Somehow there's a larger difference when we use float32
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)
