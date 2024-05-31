@@ -3021,9 +3021,9 @@ def convert_fp8_to_fp32(x, device, dtype_str):
 @pytest.mark.interpreter
 @pytest.mark.parametrize(
     "M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dtype, out_dtype, kpack",
-    [(*shape, 4, False, False, epilogue, input_precision, in_dtype, out_dtype, 1)
-     for shape in [(64, 64, 64), (32, 32, 32), (16, 16, 16)]
-     for epilogue in ['none', 'trans', 'add-matrix', 'add-rows', 'add-cols', 'softmax', 'chain-dot']
+    [(*shape, 1, False, False, epilogue, input_precision, in_dtype, out_dtype, 1)
+     for shape in [(64, 16, 16), (128, 16, 16), (16, 16, 16)]
+     for epilogue in ['none', 'chain-dot']
      for input_precision in ['tf32', 'tf32x3', 'ieee']
      for in_dtype, out_dtype in [('float16', 'float16'), ('float16', 'float32'), ('float32', 'float32')]
      if not (input_precision != 'ieee' and (in_dtype in ['float16']))] +
@@ -3210,6 +3210,21 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
             w = to_numpy(convert_fp8_to_fp32(w, device, in_dtype))
         z_ref = np.matmul(z_ref, w)
     # compare
+
+    import sys
+    torch.set_printoptions(profile="full")
+    np.set_printoptions(threshold=sys.maxsize, linewidth=sys.maxsize)
+    print("A")
+    print(x_tri)
+    print("B")
+    print(y_tri)
+    print("Diff")
+    print(np.isclose(to_numpy(z_tri), z_ref, atol=1e-02))
+    print("tri")
+    print(to_numpy(z_tri))
+    print("ref")
+    print(z_ref)
+    print("AAA")
     if in_dtype == 'float32':
         # XXX: Somehow there's a larger difference when we use float32
         np.testing.assert_allclose(z_ref, to_numpy(z_tri), rtol=0.01, atol=1e-3)

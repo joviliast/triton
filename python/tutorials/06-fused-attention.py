@@ -75,13 +75,13 @@ def _attn_fwd_inner(acc, l_i, m_i, q,  #
     return acc, l_i, m_i
 
 
-# We don't run auto-tuning every time to keep the tutorial fast. Keeping
+# We don't run auto-tuning every time to keep the tutorial fast. Uncommenting
 # the code below and commenting out the equivalent parameters is convenient for
 # re-tuning.
 configs = [
     triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN}, num_stages=s, num_warps=w) \
     for BM in [64, 128]\
-    for BN in [32, 64]\
+    for BN in [64, 128]\
     for s in ([1] if is_hip() else [3, 4, 7])\
     for w in [4, 8]\
 ]
@@ -198,7 +198,7 @@ def _attn_bwd_preprocess(O, DO,  #
     off_n = tl.arange(0, HEAD_DIM)
     # load
     o = tl.load(O + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :])
-    do = tl.load(DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]).to(tl.float32)
+    do = tl.load(DO + off_hz * HEAD_DIM * N_CTX + off_m[:, None] * HEAD_DIM + off_n[None, :]).to(tl.float16)
     delta = tl.sum(o * do, axis=1)
     # write-back
     tl.store(Delta + off_hz * N_CTX + off_m, delta)
@@ -232,7 +232,7 @@ def _attn_bwd_dkdv(dk, dv,  #
         # Load m before computing qk to reduce pipeline stall.
         offs_m = curr_m + tl.arange(0, BLOCK_M1)
         m = tl.load(M + offs_m)
-        qkT = tl.dot(k, qT)
+        qkT = tl.dot(k, qT, out_dtype=tl.float16)
         pT = tl.math.exp2(qkT - m[None, :])
         # Autoregressive masking.
         if MASK:
@@ -242,14 +242,14 @@ def _attn_bwd_dkdv(dk, dv,  #
         # Compute dV.
         ppT = pT
         ppT = ppT.to(tl.float16)
-        dv += tl.dot(ppT, do)
+        dv += tl.dot(ppT, do, out_dtype=tl.float16)
         # D (= delta) is pre-divided by ds_scale.
         Di = tl.load(D + offs_m)
         # Compute dP and dS.
-        dpT = tl.dot(v, tl.trans(do)).to(tl.float32)
+        dpT = tl.dot(v, tl.trans(do), out_dtype=tl.float16).to(tl.float16)
         dsT = pT * (dpT - Di[None, :])
         dsT = dsT.to(tl.float16)
-        dk += tl.dot(dsT, tl.trans(qT))
+        dk += tl.dot(dsT, tl.trans(qT), out_dtype=tl.float16)
         # Increment pointers.
         curr_m += step_m
         qT_ptrs += step_m * stride_tok
@@ -292,12 +292,12 @@ def _attn_bwd_dq(dq, q, K, V,  #
             mask = (offs_m[:, None] >= offs_n[None, :])
             p = tl.where(mask, p, 0.0)
         # Compute dP and dS.
-        dp = tl.dot(do, vT).to(tl.float32)
+        dp = tl.dot(do, vT, out_dtype=tl.float16).to(tl.float16)
         ds = p * (dp - Di[:, None])
         ds = ds.to(tl.float16)
         # Compute dQ.
         # NOTE: We need to de-scale dq in the end, because kT was pre-scaled.
-        dq += tl.dot(ds, tl.trans(kT))
+        dq += tl.dot(ds, tl.trans(kT), out_dtype=tl.float16)
         # Increment pointers.
         curr_n += step_n
         kT_ptrs += step_n * stride_tok
@@ -346,8 +346,8 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     MASK_BLOCK_M1: tl.constexpr = BLOCK_M1 // BLK_SLICE_FACTOR
     offs_n = start_n + tl.arange(0, BLOCK_N1)
 
-    dv = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
-    dk = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float32)
+    dv = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float16)
+    dk = tl.zeros([BLOCK_N1, HEAD_DIM], dtype=tl.float16)
 
     # load K and V: they stay in SRAM throughout the inner loop.
     k = tl.load(K + offs_n[:, None] * stride_tok + offs_k[None, :] * stride_d)
@@ -398,7 +398,7 @@ def _attn_bwd(Q, K, V, sm_scale,  #
     offs_m = start_m + tl.arange(0, BLOCK_M2)
 
     q = tl.load(Q + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d)
-    dq = tl.zeros([BLOCK_M2, HEAD_DIM], dtype=tl.float32)
+    dq = tl.zeros([BLOCK_M2, HEAD_DIM], dtype=tl.float16)
     do = tl.load(DO + offs_m[:, None] * stride_tok + offs_k[None, :] * stride_d)
 
     m = tl.load(M + offs_m)
@@ -485,7 +485,7 @@ class _attention(torch.autograd.Function):
         BATCH, N_HEAD, N_CTX = q.shape[:3]
         PRE_BLOCK = 128
         NUM_WARPS, NUM_STAGES = 4, 5
-        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 32, 128, 128, 32
+        BLOCK_M1, BLOCK_N1, BLOCK_M2, BLOCK_N2 = 64, 128, 128, 32
         BLK_SLICE_FACTOR = 2
         RCP_LN2 = 1.4426950408889634  # = 1.0 / ln(2)
         arg_k = k
@@ -551,7 +551,7 @@ def test_op(Z, H, N_CTX, HEAD_DIM, causal, dtype=torch.float16):
     assert torch.allclose(ref_out, tri_out, atol=1e-2, rtol=0)
     rtol = 0.0
     # Relative tolerance workaround for known hardware limitation of MI200 GPU.
-    # For details see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
+    # For detailss see https://pytorch.org/docs/stable/notes/numerical_accuracy.html#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
     if torch.version.hip is not None and triton.runtime.driver.active.get_current_target().arch == "gfx90a":
         rtol = 1e-2
     assert torch.allclose(ref_dv, tri_dv, atol=1e-2, rtol=rtol)
@@ -566,18 +566,18 @@ try:
 except BaseException:
     HAS_FLASH = False
 
-TORCH_HAS_FP8 = hasattr(torch, 'float8_e5m2')
+TORCH_HAS_FP8 = False
 BATCH, N_HEADS, HEAD_DIM = 4, 32, 64
 # vary seq length for fixed head and batch=4
 configs = []
-for mode in ["fwd", "bwd"]:
+for mode in ["bwd"]:
     for causal in [True, False]:
         if mode == "bwd" and not causal:
             continue
         configs.append(
             triton.testing.Benchmark(
                 x_names=["N_CTX"],
-                x_vals=[2**i for i in range(10, 15)],
+                x_vals=[2048],
                 line_arg="provider",
                 line_vals=["triton-fp16"] + (["triton-fp8"] if TORCH_HAS_FP8 else []) +
                 (["flash"] if HAS_FLASH else []),
@@ -603,14 +603,9 @@ def bench_flash_attention(BATCH, H, N_CTX, HEAD_DIM, causal, mode, provider, dev
     rep = 100
     dtype = torch.float16
     if "triton" in provider:
-        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device=device, requires_grad=True)
-        if mode == "fwd" and "fp8" in provider:
-            q = q.to(torch.float8_e5m2)
-            k = k.to(torch.float8_e5m2)
-            v = v.permute(0, 1, 3, 2)
-            v = v.to(torch.float8_e5m2)
+        q = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda", requires_grad=True)
+        k = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda", requires_grad=True)
+        v = torch.randn((BATCH, H, N_CTX, HEAD_DIM), dtype=dtype, device="cuda", requires_grad=True)
         sm_scale = 1.3
         fn = lambda: attention(q, k, v, causal, sm_scale)
         if mode == "bwd":

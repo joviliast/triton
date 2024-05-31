@@ -107,8 +107,13 @@ warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps,
 
 SmallVector<unsigned, 2>
 warpsPerTileWMMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
+  auto mInstr =
+      shape.size() == 2 &&
+              shape[0] > AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[0]
+          ? 2
+          : 1;
   return warpsPerTile(dotOp, shape, numWarps,
-                      {AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[0],
+                      {AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[0] * mInstr,
                        AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]});
 }
 

@@ -24,6 +24,7 @@
 #include "../PatternTritonGPUOpToLLVM.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
+#include <iostream>
 
 namespace mlir::triton::AMD {
 namespace {
@@ -45,7 +46,15 @@ enum class WMMAInstrType : uint8_t {
   NOT_APPLICABLE,
 };
 
-using ValueTable = std::map<std::tuple<unsigned, unsigned, unsigned>, Value>;
+bool needToTieInstr(DotOp dot) {
+  return true;
+  auto d = dot.getD();
+  return llvm::any_of(d.getUsers(), [](Operation *op) {
+    return isa<mlir::triton::gpu::LocalAllocOp>(op);
+  });
+}
+
+using ValueTable = std::map<std::tuple<int, int, int>, Value>;
 
 ValueTable
 getValuesFromDotOperandLayoutStruct(ConversionPatternRewriter &rewriter,
@@ -116,9 +125,9 @@ static WMMAInstrType getWMMAInstrTypeFromDot(DotOp op) {
 
 Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
                      WMMAInstrType wmmaType, Value valA, Value valB, Value valC,
-                     Type aElType, Type bElType) {
+                     Type aElType, Type bElType, bool upperBits) {
   auto resType = valC.getType();
-  Value falseFlag = int_val(1, false);
+  Value bitsFlag = int_val(1, upperBits);
   switch (wmmaType) {
   case WMMAInstrType::FP32_FP16:
     return rewriter.create<ROCDL::wmma_f32_16x16x16_f16>(
@@ -128,28 +137,47 @@ Value generateWMMAOp(ConversionPatternRewriter &rewriter, Location loc,
         loc, TypeRange{resType}, ValueRange{valA, valB, valC});
   case WMMAInstrType::FP16_FP16:
     return rewriter.create<ROCDL::wmma_f16_16x16x16_f16>(
-        loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+        loc, TypeRange{resType}, ValueRange{valA, valB, valC, bitsFlag});
   case WMMAInstrType::BF16_BF16:
     return rewriter.create<ROCDL::wmma_bf16_16x16x16_bf16>(
-        loc, TypeRange{resType}, ValueRange{valA, valB, valC, falseFlag});
+        loc, TypeRange{resType}, ValueRange{valA, valB, valC, bitsFlag});
   case WMMAInstrType::INT32_IU8:
     return rewriter.create<ROCDL::wmma_i32_16x16x16_iu8>(
         loc, TypeRange{resType},
         ValueRange{int_val(1, !aElType.isUnsignedInteger()), valA,
                    int_val(1, !bElType.isUnsignedInteger()), valB, valC,
-                   falseFlag});
+                   bitsFlag});
   case WMMAInstrType::INT32_IU4:
     return rewriter.create<ROCDL::wmma_i32_16x16x16_iu4>(
         loc, TypeRange{resType},
         ValueRange{int_val(1, !aElType.isUnsignedInteger()), valA,
                    int_val(1, !bElType.isUnsignedInteger()), valB, valC,
-                   falseFlag});
+                   bitsFlag});
   default:
     llvm::report_fatal_error("WMMA data type not supported");
   }
   return Value();
 }
-
+static void printValues(Location loc, RewriterBase &rewriter,
+                        std::string prefix, const SmallVector<Value> &vs) {
+  auto ctx = loc.getContext();
+  std::vector<Value> values;
+  for (const auto &v : vs) {
+    auto vTy = v.getType();
+    if (auto vecTy = dyn_cast<VectorType>(vTy)) {
+      auto elemTy = vecTy.getElementType();
+      for (int i = 0; i < vecTy.getNumElements(); ++i) {
+        values.push_back(extract_element(elemTy, v, i32_val(i)));
+      }
+    } else if (mlir::isa<LLVM::LLVMPointerType>(vTy)) {
+      values.push_back(ptrtoint(i32_ty, v));
+    } else {
+      values.push_back(v);
+    }
+  }
+  auto prefixAttr = mlir::StringAttr::get(ctx, prefix);
+  rewriter.create<triton::PrintOp>(loc, prefixAttr, false, values);
+}
 // Conduct the Dot conversion.
 LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
                          ConversionPatternRewriter &rewriter,
@@ -197,36 +225,56 @@ LogicalResult convertDot(DotOp op, DotOpAdaptor adaptor,
   auto dstElemTy = dTensorTy.getElementType();
   auto fc = unpackLLElements(loc, loadedC, rewriter);
 
-  unsigned warpSize = triton::gpu::getWarpSize(wmmaLayout);
-  constexpr unsigned vgprElemBitWidth = 32;
-  unsigned paddedOutputElemSize =
+  int warpSize = triton::gpu::getWarpSize(wmmaLayout);
+  constexpr int vgprElemBitWidth = 32;
+  int paddedOutputElemSize =
       vgprElemBitWidth / dstElemTy.getIntOrFloatBitWidth();
   // compute number of output elements that each thread holds for one WMMA
   // instruction.
   auto elemsPerVec = mnkDim[0] * mnkDim[1] * paddedOutputElemSize / warpSize;
   auto dElemsToStorePerThread = mnkDim[0] * mnkDim[1] / warpSize;
   auto vecTy = vec_ty(dstElemTy, elemsPerVec);
+  // tie instructions along m, reuse b operand
+  int numTiedInstr =
+      needToTieInstr(op) && numRepM > 1 ? std::min(2, paddedOutputElemSize) : 1;
+
+  int tiedM = numRepM / numTiedInstr;
   for (int b = 0; b < numRepB; ++b) {
-    for (int m = 0; m < numRepM; ++m) {
-      for (int n = 0; n < numRepN; ++n) {
+    for (int n = 0; n < numRepN; ++n) {
+      for (int m = 0; m < tiedM; ++m) {
         auto batchOffIdx = b * numRepM * numRepN * dElemsToStorePerThread;
-        auto mRepOffId = m * numRepN * dElemsToStorePerThread;
         auto nRepOffId = n * dElemsToStorePerThread;
-        auto fcThreadOffIdx = batchOffIdx + mRepOffId + nRepOffId;
 
         Value acc = undef(vecTy);
-        for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-          acc = insert_element(vecTy, acc, fc[fcThreadOffIdx + v],
-                               i32_val(v * paddedOutputElemSize));
+        for (int v = 0; v < dElemsToStorePerThread; ++v) {
+          for (int i = 0; i < numTiedInstr; ++i) {
+            int mUntied = m * numTiedInstr + i;
+            auto mRepOffId = mUntied * numRepN * dElemsToStorePerThread;
+            auto fcThreadOffIdx = batchOffIdx + mRepOffId + nRepOffId;
+            acc = insert_element(vecTy, acc, fc[fcThreadOffIdx + v],
+                                 i32_val(v * paddedOutputElemSize + i));
+          }
         }
-        for (size_t k = 0; k < numRepK; k++) {
-          acc = generateWMMAOp(rewriter, loc, wmmaInstrType, ha[{b, m, k}],
-                               hb[{b, n, k}], acc, aTensorTy.getElementType(),
-                               bTensorTy.getElementType());
+        for (size_t k = 0; k < numRepK; ++k) {
+          for (int i = 0; i < numTiedInstr; ++i) {
+            int mUntied = m * numTiedInstr + i;
+            rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt, 0);
+            acc = generateWMMAOp(rewriter, loc, wmmaInstrType,
+                                 ha[{b, mUntied, k}], hb[{b, n, k}], acc,
+                                 aTensorTy.getElementType(),
+                                 bTensorTy.getElementType(), i % 2 == 1);
+            rewriter.create<ROCDL::SchedBarrier>(loc, std::nullopt, 0);
+          }
         }
-        for (unsigned v = 0; v < dElemsToStorePerThread; ++v) {
-          fc[fcThreadOffIdx + v] = extract_element(
-              dstElemTy, acc, i32_val(v * paddedOutputElemSize));
+
+        for (int v = 0; v < dElemsToStorePerThread; ++v) {
+          for (int i = 0; i < numTiedInstr; ++i) {
+            int mUntied = m * numTiedInstr + i;
+            auto mRepOffId = mUntied * numRepN * dElemsToStorePerThread;
+            auto fcThreadOffIdx = batchOffIdx + mRepOffId + nRepOffId;
+            fc[fcThreadOffIdx + v] = extract_element(
+                dstElemTy, acc, i32_val(v * paddedOutputElemSize + i));
+          }
         }
       }
     }

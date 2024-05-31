@@ -99,6 +99,7 @@ using namespace mlir::triton;
 #define select(...) rewriter.create<LLVM::SelectOp>(loc, __VA_ARGS__)
 #define address_of(...) rewriter.create<LLVM::AddressOfOp>(loc, __VA_ARGS__)
 #define barrier() rewriter.create<mlir::gpu::BarrierOp>(loc)
+#define v_nop() rewriter.create<mlir::gpu::nop>(loc)
 #define undef(...) rewriter.create<LLVM::UndefOp>(loc, __VA_ARGS__)
 #define null(...) rewriter.create<LLVM::ZeroOp>(loc, __VA_ARGS__)
 #define call(...) rewriter.create<LLVM::CallOp>(loc, __VA_ARGS__)
