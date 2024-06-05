@@ -233,6 +233,24 @@ public:
     // elementwise(splat(a), splat(b), ...) => splat(elementwise(a, b, ...))
     patterns.add<MoveSplatAfterElementwisePattern>(context);
 
+    m.walk([](mlir::triton::LoadOp loadOp) -> void {
+      auto operands = loadOp->getOperands();
+      Operation *lastDef = nullptr;
+      for (auto &operation : llvm::reverse(*loadOp->getBlock())) {
+        if (llvm::any_of(operands, [&](auto v) {
+              return v.getDefiningOp() == &operation;
+            })) {
+          lastDef = &operation;
+          break;
+        }
+      }
+      if (lastDef)
+        loadOp->moveAfter(lastDef);
+      else
+        loadOp->moveBefore(&loadOp->getBlock()->front());
+      return;
+    });
+
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed())
       signalPassFailure();
   }

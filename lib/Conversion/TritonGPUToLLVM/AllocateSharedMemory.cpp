@@ -23,6 +23,42 @@ struct AllocateSharedMemory
   void runOnOperation() override {
     ModuleOp mod = getOperation();
     MLIRContext *ctx = &getContext();
+
+    mod.walk([](triton::gpu::LocalAllocOp localAllocOp) -> void {
+      auto operands = localAllocOp->getOperands();
+      Operation *lastDef = nullptr;
+      for (auto &operation : llvm::reverse(*localAllocOp->getBlock())) {
+        if (llvm::any_of(operands, [&](auto v) {
+              return v.getDefiningOp() == &operation;
+            })) {
+          lastDef = &operation;
+          break;
+        }
+      }
+      if (lastDef)
+        localAllocOp->moveAfter(lastDef);
+      else
+        localAllocOp->moveBefore(&localAllocOp->getBlock()->front());
+      return;
+    });
+    mod.walk([](triton::gpu::LocalLoadOp localloadOp) -> void {
+      auto operands = localloadOp->getOperands();
+      Operation *lastDef = nullptr;
+      for (auto &operation : llvm::reverse(*localloadOp->getBlock())) {
+        if (llvm::any_of(operands, [&](auto v) {
+              return v.getDefiningOp() == &operation;
+            })) {
+          lastDef = &operation;
+          break;
+        }
+      }
+      if (lastDef)
+        localloadOp->moveAfter(lastDef);
+      else
+        localloadOp->moveBefore(&localloadOp->getBlock()->front());
+      return;
+    });
+
     ModuleAllocation allocation(mod);
 
     mod.walk([&](FunctionOpInterface funcOp) {

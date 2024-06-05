@@ -110,8 +110,17 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
       !isa<gpu::BarrierOp>(op->getNextNode())) {
     // If the current op is an async wait and the next op is not a barrier we
     // insert a barrier op and sync
-    builder->setInsertionPointAfter(op);
-    insertBarrier(op, builder);
+    auto users = op->getUsers();
+    Operation *insPointOp;
+    for (auto &blockOp : *op->getBlock()) {
+      if (llvm::any_of(users, [&](Operation *op) { return op == &blockOp; })) {
+        insPointOp = &blockOp;
+        break;
+      }
+    }
+
+    builder->setInsertionPoint(insPointOp);
+    insertBarrier(insPointOp, builder);
     blockInfo->sync();
     return;
   }
