@@ -143,8 +143,8 @@ protected:
 
   void runWmmaSingleCTA(int row, int col, llvm::ArrayRef<unsigned> warpsPerCTA,
                         const std::string &refStr) {
-    auto layout =
-        AMDWmmaEncodingAttr::get(&context, warpsPerCTA, getSingleCTALayout2d());
+    auto layout = AMDWmmaEncodingAttr::get(&context, 1, warpsPerCTA,
+                                           getSingleCTALayout2d());
     runDistributed2d(row, col, layout, /*multiCTA=*/false, refStr);
   }
 
@@ -725,6 +725,7 @@ TEST_F(EmitIndicesTest, LayoutVisualizer_Wmma) {
 
   Attribute wmmaLayout = AMDWmmaEncodingAttr::get(
       /*context=*/&context,
+      /*version=*/1,
       /*warpsPerCTA=*/{1, 1}, /*CTALayout=*/CTALayout);
 
   llvm::SmallVector<int64_t> shape = {/*row=*/16, /*col=*/16};

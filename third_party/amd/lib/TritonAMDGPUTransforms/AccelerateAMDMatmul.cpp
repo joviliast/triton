@@ -108,8 +108,8 @@ warpsPerTileMFMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps,
 SmallVector<unsigned, 2>
 warpsPerTileWMMA(tt::DotOp dotOp, const ArrayRef<int64_t> shape, int numWarps) {
   return warpsPerTile(dotOp, shape, numWarps,
-                      {AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[0],
-                       AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr()[1]});
+                      {AMDWmmaEncodingAttr::getMNKDimPerInstr()[0],
+                       AMDWmmaEncodingAttr::getMNKDimPerInstr()[1]});
 }
 
 using OperandTypesVector = SmallVector<Type, 4>;
@@ -619,7 +619,7 @@ public:
     auto bShape = oldBType.getShape();
 
     // check shape
-    auto mnkDim = AMDWmmaEncodingAttr::getMNKDimPerWMMAInstr();
+    auto mnkDim = AMDWmmaEncodingAttr::getMNKDimPerInstr();
     auto rank = aShape.size();
     if (aShape[rank - 2] % mnkDim[0] != 0 || // m
         bShape[rank - 1] % mnkDim[1] != 0 || // n
@@ -640,7 +640,8 @@ public:
     auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
 
     auto CTALayout = ttg::getCTALayout(oldRetEncoding);
-    wmmaEnc = AMDWmmaEncodingAttr::get(ctx, warpsPerTile, CTALayout);
+    wmmaEnc = AMDWmmaEncodingAttr::get(
+        oldRetType.getContext(), /* version = */ 1, warpsPerTile, CTALayout);
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 
