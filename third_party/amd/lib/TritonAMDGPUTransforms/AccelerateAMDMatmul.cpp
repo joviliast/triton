@@ -21,37 +21,44 @@ using ttg::AMDWmmaEncodingAttr;
 using ttg::BlockedEncodingAttr;
 using ttg::ConvertLayoutOp;
 using ttg::DotOperandEncodingAttr;
-using ttg::SliceEncodingAttr;
 
-enum class MatrixCoreVersion {
-  CDNA_MFMA1,
-  CDNA_MFMA2,
-  CDNA_MFMA3,
-  RDNA_WMMA,
-  UNKNOWN
+using MatCoreBitmap = uint16_t;
+constexpr MatCoreBitmap mfmaBase =
+    ~(std::numeric_limits<MatCoreBitmap>::max() >> 1);
+constexpr MatCoreBitmap wmmaBase = mfmaBase >> 1;
+enum class MatrixCoreVersion : MatCoreBitmap {
+  MFMA1 = mfmaBase + 1,
+  MFMA2,
+  MFMA3,
+  WMMA1 = wmmaBase + 1,
+  WMMA2,
+  UNKNOWN = 0
 };
+
+bool mfmaSupported(MatrixCoreVersion mcVersion) {
+  return mfmaBase & static_cast<MatCoreBitmap>(mcVersion);
+}
+bool wmmaSupported(MatrixCoreVersion mcVersion) {
+  return wmmaBase & static_cast<MatCoreBitmap>(mcVersion);
+}
+int getVersion(MatrixCoreVersion mcVersion) {
+  return (std::min(mfmaBase, wmmaBase) - 1) &
+         static_cast<MatCoreBitmap>(mcVersion);
+}
 
 MatrixCoreVersion getMatrixCoreVersion(StringRef archGen) {
   if (archGen.contains("gfx11"))
-    return MatrixCoreVersion::RDNA_WMMA;
+    return MatrixCoreVersion::WMMA1;
+  if (archGen.contains("gfx12"))
+    return MatrixCoreVersion::WMMA2;
   if (archGen.contains("gfx908"))
-    return MatrixCoreVersion::CDNA_MFMA1;
+    return MatrixCoreVersion::MFMA1;
   if (archGen.contains("gfx90a"))
-    return MatrixCoreVersion::CDNA_MFMA2;
+    return MatrixCoreVersion::MFMA2;
   if (archGen.contains("gfx940") || archGen.contains("gfx941") ||
       archGen.contains("gfx942"))
-    return MatrixCoreVersion::CDNA_MFMA3;
+    return MatrixCoreVersion::MFMA3;
   return MatrixCoreVersion::UNKNOWN;
-}
-
-int getMfmaVersion(MatrixCoreVersion matrixCoreVer) {
-  if (MatrixCoreVersion::CDNA_MFMA1 == matrixCoreVer)
-    return 1;
-  if (MatrixCoreVersion::CDNA_MFMA2 == matrixCoreVer)
-    return 2;
-  if (MatrixCoreVersion::CDNA_MFMA3 == matrixCoreVer)
-    return 3;
-  return 0;
 }
 
 SmallVector<unsigned, 2> warpsPerTile(tt::DotOp dotOp,
@@ -173,7 +180,7 @@ selectMatrixCoreOperandTypes(tt::DotOp dot,
 }
 
 OperandTypesVector getOperandTypesForWmmaOp(mlir::PatternRewriter &rewriter,
-                                            tt::DotOp dot) {
+                                            tt::DotOp dot, int version) {
   Type f16 = rewriter.getF16Type();
   Type f32 = rewriter.getF32Type();
   Type bf16 = rewriter.getBF16Type();
@@ -190,6 +197,20 @@ OperandTypesVector getOperandTypesForWmmaOp(mlir::PatternRewriter &rewriter,
       // by WMMA instruction, but not supported by triton
       // clang-format on
   };
+  // TODO: support fp8 configurations for WMMAv2. The code should be as
+  // following:
+  // if (version == 2) {
+  //   Type fp8 = rewriter.getFp8Type();
+  //   Type bf8 = rewriter.getBF8Type();
+  //   applicableTypes.append({
+  //       // clang-format off
+  //       {fp8, fp8, f32, f32},
+  //       {fp8, bf8, f32, f32},
+  //       {bf8, fp8, f32, f32},
+  //       {bf8, bf8, f32, f32},
+  //       // clang-format on
+  //   });
+  // }
   return selectMatrixCoreOperandTypes(dot, applicableTypes);
 }
 
@@ -594,9 +615,12 @@ static void decomposeMixedModeDotOp(ModuleOp mod) {
 }
 
 class BlockedToWMMA : public mlir::RewritePattern {
+  int wmmaVersion;
+
 public:
-  BlockedToWMMA(mlir::MLIRContext *context)
-      : mlir::RewritePattern(tt::DotOp::getOperationName(), 2, context) {}
+  BlockedToWMMA(mlir::MLIRContext *context, int wmmaVersion)
+      : mlir::RewritePattern(tt::DotOp::getOperationName(), 2, context),
+        wmmaVersion(wmmaVersion) {}
 
   mlir::LogicalResult
   matchAndRewrite(mlir::Operation *op,
@@ -627,9 +651,15 @@ public:
       return failure();
 
     // get operand types
-    auto operandTypes = getOperandTypesForWmmaOp(rewriter, dotOp);
+    auto operandTypes = getOperandTypesForWmmaOp(rewriter, dotOp, wmmaVersion);
     if (operandTypes.empty())
       return failure();
+
+    // not supported yet
+    if (wmmaVersion == 2 && llvm::isa<FloatType>(operandTypes[0]) &&
+        operandTypes[0].getIntOrFloatBitWidth() == 8) {
+      return failure();
+    }
 
     // get WMMA encoding for the given number of warps
     auto mod = op->getParentOfType<mlir::ModuleOp>();
@@ -640,8 +670,8 @@ public:
     auto warpsPerTile = warpsPerTileWMMA(dotOp, retShape, numWarps);
 
     auto CTALayout = ttg::getCTALayout(oldRetEncoding);
-    wmmaEnc = AMDWmmaEncodingAttr::get(
-        oldRetType.getContext(), /* version = */ 1, warpsPerTile, CTALayout);
+    wmmaEnc = AMDWmmaEncodingAttr::get(oldRetType.getContext(), wmmaVersion,
+                                       warpsPerTile, CTALayout);
 
     auto newRetType = RankedTensorType::get(retShape, operandTypes[3], wmmaEnc);
 
@@ -652,10 +682,12 @@ public:
 
     auto newAType = RankedTensorType::get(
         aShape, operandTypes[0],
-        ttg::DotOperandEncodingAttr::get(ctx, 0, wmmaEnc, mnkDim[2]));
+        ttg::DotOperandEncodingAttr::get(
+            ctx, 0, wmmaEnc, wmmaEnc.getSizePerThreadForOperands(0)[rank - 1]));
     auto newBType = RankedTensorType::get(
         bShape, operandTypes[1],
-        ttg::DotOperandEncodingAttr::get(ctx, 1, wmmaEnc, mnkDim[2]));
+        ttg::DotOperandEncodingAttr::get(
+            ctx, 1, wmmaEnc, wmmaEnc.getSizePerThreadForOperands(1)[rank - 2]));
 
     Value castedA = convertAndCastTensor(rewriter, a, newAType.getEncoding(),
                                          operandTypes[0]);
@@ -693,13 +725,11 @@ public:
 
     mlir::RewritePatternSet patterns(context);
     auto matrixCoreVer = getMatrixCoreVersion(archGenerationName);
-    if (MatrixCoreVersion::CDNA_MFMA1 == matrixCoreVer ||
-        MatrixCoreVersion::CDNA_MFMA2 == matrixCoreVer ||
-        MatrixCoreVersion::CDNA_MFMA3 == matrixCoreVer) {
-      patterns.add<::BlockedToMFMA>(context, getMfmaVersion(matrixCoreVer),
+    if (mfmaSupported(matrixCoreVer)) {
+      patterns.add<::BlockedToMFMA>(context, getVersion(matrixCoreVer),
                                     matrixInstructionSize, kPack);
-    } else if (matrixCoreVer == MatrixCoreVersion::RDNA_WMMA) {
-      patterns.add<::BlockedToWMMA>(context);
+    } else if (wmmaSupported(matrixCoreVer)) {
+      patterns.add<::BlockedToWMMA>(context, getVersion(matrixCoreVer));
     }
     if (applyPatternsAndFoldGreedily(m, std::move(patterns)).failed()) {
       signalPassFailure();
