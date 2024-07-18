@@ -48,9 +48,15 @@ private:
            isPredicatedLoadNT(callOp);
   }
 
+  bool isPredicatedStoreNT(LLVM::CallOp callOp) const {
+    return callOp.getCallee().value().find(
+               mlir::LLVM::AMD::Predicated_Store_NT) != llvm::StringRef::npos;
+  }
+
   bool isPredicatedStore(LLVM::CallOp callOp) const {
     return callOp.getCallee().value().find(mlir::LLVM::AMD::Predicated_Store) !=
-           llvm::StringRef::npos;
+               llvm::StringRef::npos ||
+           isPredicatedStoreNT(callOp);
   }
 
   bool isWrappedLLVMIntrinsic(LLVM::CallOp callOp) const {
@@ -78,7 +84,9 @@ private:
     rewriter.setInsertionPointToEnd(currentBlock);
     rewriter.create<LLVM::CondBrOp>(loc, pred, trueBlock, afterStore);
     rewriter.setInsertionPointToStart(trueBlock);
-    auto storeOp = rewriter.create<LLVM::StoreOp>(loc, val, ptr);
+    auto storeOp = rewriter.create<LLVM::StoreOp>(
+        loc, val, ptr, /*alignment=*/0, /*volatile=*/false,
+        /*non-temporal=*/isPredicatedStoreNT(callOp));
     rewriter.create<LLVM::BrOp>(loc, afterStore);
     rewriter.setInsertionPointToStart(afterStore);
     rewriter.eraseOp(callOp);

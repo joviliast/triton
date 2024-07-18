@@ -13,6 +13,7 @@ namespace mlir::LLVM::AMD {
 const char Predicated_Load[] = "__predicated_load";
 const char Predicated_Load_NT[] = "__predicated_load_NT";
 const char Predicated_Store[] = "__predicated_store";
+const char Predicated_Store_NT[] = "__predicated_store_NT";
 
 Value shuffleXor(Location loc, RewriterBase &rewriter, Value val, int i);
 Value shuffleUp(Location loc, RewriterBase &rewriter, Value val, int i);
@@ -29,7 +30,7 @@ Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
 
 // Stores to shared or global memory with predication.
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred);
+             Value pred, bool nt = false);
 } // namespace mlir::LLVM::AMD
 
 #endif

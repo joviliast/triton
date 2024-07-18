@@ -3855,7 +3855,7 @@ def test_vectorization_hints(has_hints, device):
 
 
 @pytest.mark.interpreter
-@pytest.mark.parametrize("cache", ["", ".wb", ".cg", ".cs", ".wt"])
+@pytest.mark.parametrize("cache", ["", ".wb", ".cg", ".cs", ".wt", ".nt"])
 def test_store_cache_modifier(cache, device):
     src = torch.empty(128, device=device)
     dst = torch.empty(128, device=device)
@@ -3866,9 +3866,20 @@ def test_store_cache_modifier(cache, device):
         x = tl.load(src + offsets)
         tl.store(dst + offsets, x, cache_modifier=CACHE)
 
-    if not is_cuda():
-        return
     pgm = _kernel[(1, )](dst, src, CACHE=cache)
+
+    if not is_cuda():
+        amdgcn = pgm.asm['amdgcn']
+        target_arch = triton.runtime.driver.active.get_current_target().arch
+        # for gfx7/8/11 use 'slc' flag to identify non-temporal access
+        nt_access_flag = 'nt' if "gfx9" in target_arch else 'slc'
+        global_store_line = [line for line in amdgcn.splitlines() if "global_store" in line]
+        if cache == '':
+            assert nt_access_flag not in global_store_line[0]
+        if cache == '.nt':
+            assert nt_access_flag in global_store_line[0]
+        return
+
     ptx = pgm.asm['ptx']
     if cache == '':
         assert 'st.global.wb' not in ptx

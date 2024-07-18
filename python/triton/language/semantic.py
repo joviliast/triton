@@ -874,6 +874,8 @@ def _str_to_store_cache_modifier(cache_modifier):
             cache = ir.CACHE_MODIFIER.CS
         elif cache_modifier == ".wt":
             cache = ir.CACHE_MODIFIER.WT
+        elif cache_modifier == ".nt":
+            cache = ir.CACHE_MODIFIER.NT
         else:
             raise ValueError(f"Cache modifier {cache_modifier} not supported")
     return cache
