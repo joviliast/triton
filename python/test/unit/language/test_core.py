@@ -3773,11 +3773,14 @@ def test_load_cache_modifier(cache, device):
 
     if not is_cuda():
         amdgcn = pgm.asm['amdgcn']
+        target_arch = triton.runtime.driver.active.get_current_target().arch
+        # for gfx7/8/11 use 'slc' flag to identify non-temporal access
+        nt_access_flag = 'nt' if "gfx9" in target_arch else 'slc'
         global_load_line = [line for line in amdgcn.splitlines() if "global_load" in line]
         if cache == '':
-            assert 'nt' not in global_load_line[0]
+            assert nt_access_flag not in global_load_line[0]
         if cache == '.nt':
-            assert 'nt' in global_load_line[0]
+            assert nt_access_flag in global_load_line[0]
         return
 
     ptx = pgm.asm['ptx']
