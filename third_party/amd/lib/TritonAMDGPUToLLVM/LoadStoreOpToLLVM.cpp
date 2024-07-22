@@ -224,8 +224,8 @@ struct LoadOpConversion : public ConvertOpToLLVMPattern<triton::LoadOp>,
         falseVal = v;
       }
 
-      bool nt = op.getCache() == triton::CacheModifier::CG;
-      auto loadVal = llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, nt);
+      auto loadVal =
+          llLoad(rewriter, loc, ptr, vecTy, pred, falseVal, op.getCache());
       for (size_t ii = 0; ii < vec; ++ii) {
         Value vecIdx = createIndexAttrConstant(
             rewriter, loc, this->getTypeConverter()->getIndexType(), ii % vec);
@@ -293,7 +293,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         std::max<int>(1, valueElemTy.getIntOrFloatBitWidth() / 8);
     const size_t valueElemNBits = dtsize * 8;
 
-    bool nt = op.getCache() == triton::CacheModifier::CG;
+    auto cacheMod = op.getCache();
     const int numVecs = elemsPerThread / vec;
     for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
       // TODO: optimization when ptr is AddPtr with constant offset
@@ -330,7 +330,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         llWord = bitcast(llWord, valArgTy);
         Value maskVal = llMask ? and_(mask, maskElems[vecStart]) : mask;
         auto address = ptrElems[vecStart + wordIdx * wordNElems];
-        llStore(rewriter, loc, address, llWord, maskVal, nt);
+        llStore(rewriter, loc, address, llWord, maskVal, cacheMod);
       }
     }
     rewriter.eraseOp(op);

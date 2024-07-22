@@ -3878,12 +3878,20 @@ def test_store_cache_modifier(cache, device):
             if 'gfx11' in arch:
                 return
             amdgcn = pgm.asm['amdgcn']
-            cache_modifier_str = 'nt' if 'gfx94' in arch else 'glc'
+            cg_cache_modifier_str = 'nt' if 'gfx94' in arch else 'glc'
+            wt_cache_modifier_str = 'sc1'
             global_store_line = [line for line in amdgcn.splitlines() if "global_store" in line]
-            if cache == '':
-                assert cache_modifier_str not in global_store_line[0]
+            if cache == '' or cache == '.wb':
+                assert cg_cache_modifier_str not in global_store_line[0]
+                assert wt_cache_modifier_str not in global_store_line[0]
             if cache == '.cg':
-                assert cache_modifier_str in global_store_line[0]
+                assert cg_cache_modifier_str in global_store_line[0]
+                assert wt_cache_modifier_str not in global_store_line[0]
+            if cache == '.wt':
+                if 'gfx94' not in arch:
+                    return
+                assert cg_cache_modifier_str not in global_store_line[0]
+                assert wt_cache_modifier_str in global_store_line[0]
         return
 
     ptx = pgm.asm['ptx']

@@ -14,6 +14,7 @@ const char Predicated_Load[] = "__predicated_load";
 const char Predicated_Load_NT[] = "__predicated_load_NT";
 const char Predicated_Store[] = "__predicated_store";
 const char Predicated_Store_NT[] = "__predicated_store_NT";
+const char Predicated_Store_WT[] = "__predicated_store_WT";
 
 Value shuffleXor(Location loc, RewriterBase &rewriter, Value val, int i);
 Value shuffleUp(Location loc, RewriterBase &rewriter, Value val, int i);
@@ -26,11 +27,12 @@ Value llGetPid(Location loc, RewriterBase &rewriter, ModuleOp moduleOp,
 // Loads from shared or global memory with predication.
 // `otherElems` is used to mask out the elements that are not loaded
 Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
-             Value pred, Value falseVal, bool nt = false);
+             Value pred, Value falseVal,
+             triton::CacheModifier cm = triton::CacheModifier::CA);
 
 // Stores to shared or global memory with predication.
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred, bool nt = false);
+             Value pred, triton::CacheModifier cm = triton::CacheModifier::WB);
 } // namespace mlir::LLVM::AMD
 
 #endif
