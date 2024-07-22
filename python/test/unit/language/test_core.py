@@ -3773,8 +3773,12 @@ def test_load_cache_modifier(cache, device):
 
     if not is_cuda():
         if is_hip():
+            arch = get_arch()
+            # TODO: support gfx11 testing
+            if 'gfx11' in arch:
+                return
             amdgcn = pgm.asm['amdgcn']
-            cache_modifier_str = 'nt' if 'gfx94' in get_arch() else 'glc'
+            cache_modifier_str = 'nt' if 'gfx94' in arch else 'glc'
             global_load_line = [line for line in amdgcn.splitlines() if "global_load" in line]
             if cache == '':
                 assert cache_modifier_str not in global_load_line[0]
@@ -3865,9 +3869,23 @@ def test_store_cache_modifier(cache, device):
         x = tl.load(src + offsets)
         tl.store(dst + offsets, x, cache_modifier=CACHE)
 
-    if not is_cuda():
-        return
     pgm = _kernel[(1, )](dst, src, CACHE=cache)
+
+    if not is_cuda():
+        if is_hip():
+            arch = get_arch()
+            # TODO: support gfx11 testing
+            if 'gfx11' in arch:
+                return
+            amdgcn = pgm.asm['amdgcn']
+            cache_modifier_str = 'nt' if 'gfx94' in arch else 'glc'
+            global_store_line = [line for line in amdgcn.splitlines() if "global_store" in line]
+            if cache == '':
+                assert cache_modifier_str not in global_store_line[0]
+            if cache == '.cg':
+                assert cache_modifier_str in global_store_line[0]
+        return
+
     ptx = pgm.asm['ptx']
     if cache == '':
         assert 'st.global.wb' not in ptx

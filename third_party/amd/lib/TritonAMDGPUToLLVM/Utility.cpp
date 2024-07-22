@@ -173,11 +173,13 @@ Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
-             Value pred) {
+             Value pred, bool nt) {
   auto ctx = ptr.getContext();
   Type funcType = getFunctionType(void_ty(ctx), ValueRange({ptr, val, pred}));
   auto parent = ptr.getParentRegion()->getParentOfType<LLVM::LLVMFuncOp>();
-  auto funcName = mangleFunc(mlir::LLVM::AMD::Predicated_Store, funcType);
+  auto funcNameRaw = nt ? mlir::LLVM::AMD::Predicated_Store_NT
+                        : mlir::LLVM::AMD::Predicated_Store;
+  auto funcName = mangleFunc(funcNameRaw, funcType);
   LLVM::LLVMFuncOp funcOp =
       appendOrGetExternFuncOp(rewriter, parent, funcName, funcType);
   rewriter.create<LLVM::CallOp>(loc, funcOp, ValueRange({ptr, val, pred}));

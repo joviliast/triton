@@ -293,6 +293,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         std::max<int>(1, valueElemTy.getIntOrFloatBitWidth() / 8);
     const size_t valueElemNBits = dtsize * 8;
 
+    bool nt = op.getCache() == triton::CacheModifier::CG;
     const int numVecs = elemsPerThread / vec;
     for (size_t vecStart = 0; vecStart < elemsPerThread; vecStart += vec) {
       // TODO: optimization when ptr is AddPtr with constant offset
@@ -329,7 +330,7 @@ struct StoreOpConversion : public ConvertOpToLLVMPattern<triton::StoreOp>,
         llWord = bitcast(llWord, valArgTy);
         Value maskVal = llMask ? and_(mask, maskElems[vecStart]) : mask;
         auto address = ptrElems[vecStart + wordIdx * wordNElems];
-        llStore(rewriter, loc, address, llWord, maskVal);
+        llStore(rewriter, loc, address, llWord, maskVal, nt);
       }
     }
     rewriter.eraseOp(op);
