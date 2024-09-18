@@ -3,6 +3,7 @@
 #include "Utility.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
 #include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 namespace mlir::triton::AMD {
@@ -129,11 +130,109 @@ Value TargetInfo::programId(RewriterBase &rewriter, Location loc,
   return LLVM::AMD::llGetPid(loc, rewriter, moduleOp, axis);
 }
 
+void accumulate(RewriterBase &rewriter, Region &combineOp,
+                SmallVector<Value> &acc, ValueRange cur, bool isFirst) {
+  if (isFirst) {
+    acc = SmallVector<Value>(cur.begin(), cur.end());
+    return;
+  }
+
+  // Create a new copy of the reduce block, and inline it
+  Block *currentBlock = rewriter.getBlock();
+  Region &parent = *currentBlock->getParent();
+  rewriter.cloneRegionBefore(combineOp, &parent.front());
+  auto &newReduce = parent.front();
+  auto returnOp = dyn_cast<triton::ReduceReturnOp>(newReduce.getTerminator());
+
+  llvm::SmallVector<Value> combineArgs(2 * acc.size());
+  for (unsigned i = 0; i < acc.size(); ++i) {
+    combineArgs[i] = acc[i];
+    combineArgs[acc.size() + i] = cur[i];
+  }
+
+  rewriter.inlineBlockBefore(&newReduce, &*rewriter.getInsertionPoint(),
+                             combineArgs);
+
+  auto results = returnOp.getResult();
+  for (unsigned i = 0; i < acc.size(); ++i) {
+    acc[i] = results[i];
+  }
+
+  // Delete the terminator, which is no longer used
+  rewriter.eraseOp(returnOp);
+}
+
 bool TargetInfo::warpReduce(RewriterBase &rewriter, Location loc,
                             SmallVector<Value> &acc, triton::ReduceOp op,
                             unsigned numLaneToReduce,
                             unsigned interleave) const {
-  return false;
+  if (numLaneToReduce != 64) {
+    return false;
+  }
+  for (auto currAcc : acc) {
+    Type srcType = currAcc.getType(); // ??????
+    Type llvmType = nullptr;
+    if (srcType.getIntOrFloatBitWidth() < 32) {
+      llvmType = rewriter.getI32Type();
+    } else if (isa<FloatType>(srcType)) {
+      llvmType = (srcType.getIntOrFloatBitWidth() == 32)
+                     ? rewriter.getF32Type()
+                     : rewriter.getF64Type();
+    } else if (isa<IntegerType>(srcType)) {
+      llvmType = (srcType.getIntOrFloatBitWidth() == 32)
+                     ? rewriter.getI32Type()
+                     : rewriter.getI64Type();
+    }
+    /*
+         |       bank0 |       bank1 |       bank2 |       bank3 |
+    row0 | 0  1  2  3  | 4  5  6  7  | 8  9  10 11 | 12 13 14 15 |
+    row1 | 16 17 18 19 | 20 21 22 23 | 24 25 26 27 | 28 29 30 31 |
+    row2 | 32 33 34 35 | 36 37 38 39 | 40 41 42 43 | 44 45 46 47 |
+    row3 | 48 49 50 51 | 52 53 54 55 | 56 57 58 59 | 60 61 62 63 |
+
+    Reduction steps:
+    1. Reduce values with row_shr
+    1.1. bank0, bank1, bank2, bank3 (row_shr8)-> bank2, bank3
+    1.2. bank2, bank3 (row_shr4)-> bank3
+    1.3. bank3 (row_shr2)-> 2 vals per row
+    1.4. bank3 (row_shr1)-> 1 vals per row
+    2. Reduce rows in a single bank with row_bcast
+    2.1. row0, row1, row2, row3 (row_bcast15)-> row1, row3
+    2.2. row1, row3 (row_bcast31)-> row3
+    */
+    unsigned origLanesToReduce = numLaneToReduce;
+    unsigned numRows = origLanesToReduce == 64 ? 4 : 2;
+    Value updatedAcc = currAcc;
+    for (; numLaneToReduce > 1; numLaneToReduce /= 2) {
+      unsigned rowOffset = (numLaneToReduce / numRows) / 2;
+      unsigned dppCtrl = numLaneToReduce > numRows
+                             ? 0x110 + rowOffset // row_shr
+                             : 0x142 + static_cast<unsigned>(
+                                           origLanesToReduce == 64 &
+                                           numLaneToReduce == 2); // row_bcast
+      unsigned rowMask = 0xF;
+      rowMask &= ~((static_cast<unsigned>(numLaneToReduce == numRows))
+                   << 1); // collect result in the 1 row for the last iterations
+      rowMask &= (static_cast<unsigned>(numLaneToReduce == numRows &&
+                                        origLanesToReduce == 64))
+                 << 3; // collect result also in the 3 row on the 2.1 step
+      unsigned bankMask = 0xF;
+      bankMask &=
+          ~((static_cast<unsigned>(numLaneToReduce == origLanesToReduce)) << 2);
+      bankMask &=
+          ~((static_cast<unsigned>(numLaneToReduce >= origLanesToReduce / 2))
+            << 3);
+      unsigned boundCtrl = numLaneToReduce <= numRows ||
+                           bankMask != 0x0; // row reduction within one bank
+
+      auto dppMovOp = rewriter.create<ROCDL::DPPUpdateOp>(
+          loc, llvmType, updatedAcc, updatedAcc, dppCtrl, rowMask, bankMask,
+          boundCtrl);
+      updatedAcc = dppMovOp.getRes();
+      accumulate(rewriter, op.getCombineOp(), acc, updatedAcc, false);
+    }
+  }
+  return true;
 }
 
 bool TargetInfo::processReplicaUsingStMatrix(
