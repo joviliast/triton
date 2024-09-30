@@ -204,6 +204,7 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   auto name = getWmmaIntrinsicName(aElType, bElType, dElType, valA.getType(),
                                    valC.getType());
   LLVM::FastmathFlagsAttr defaultFlags{};
+  llvm::SmallVector<mlir::ValueRange> opBundleOps{};
   SmallVector<Value> operands;
   if (aElType.isInteger())
     operands.push_back(int_val(1, !aElType.isUnsignedInteger()));
@@ -219,7 +220,7 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   }
   auto wmmaIntrinsic = rewriter.create<mlir::LLVM::CallIntrinsicOp>(
       loc, TypeRange{valC.getType()}, StringAttr::get(loc.getContext(), name),
-      operands, defaultFlags);
+      operands, defaultFlags, opBundleOps);
 
   return wmmaIntrinsic.getResult(0);
 }

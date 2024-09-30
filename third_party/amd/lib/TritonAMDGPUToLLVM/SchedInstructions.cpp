@@ -48,9 +48,10 @@ void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
                                           static_cast<int32_t>(groupIdValue));
 
   LLVM::FastmathFlagsAttr defaultFlags{};
+  llvm::SmallVector<mlir::ValueRange> opBundleOps{};
   rewriter.create<LLVM::CallIntrinsicOp>(loc, TypeRange{}, intrinsicName,
                                          ValueRange{mask, size, groupId},
-                                         defaultFlags);
+                                         defaultFlags, opBundleOps);
 }
 
 // Insert intrinsic that controls the types of instructions that may be
@@ -60,11 +61,13 @@ Operation *createSchedBarrier(PatternRewriter &rewriter, Location loc,
   MLIRContext *ctx = rewriter.getContext();
   auto intrinsicName = str_attr("llvm.amdgcn.sched.barrier");
   LLVM::FastmathFlagsAttr defaultFlags{};
+  llvm::SmallVector<mlir::ValueRange> opBundleOps{};
 
   Value mask =
       LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(maskValue));
   return rewriter.create<LLVM::CallIntrinsicOp>(loc, TypeRange{}, intrinsicName,
-                                                ValueRange{mask}, defaultFlags);
+                                                ValueRange{mask}, defaultFlags,
+                                                opBundleOps);
 }
 
 // Insert an experimental intrinsic for instruction group level parallelism.
@@ -73,10 +76,12 @@ Operation *createIglpOpt(PatternRewriter &rewriter, Location loc, int value) {
   MLIRContext *ctx = rewriter.getContext();
   auto intrinsicName = str_attr("llvm.amdgcn.iglp.opt");
   LLVM::FastmathFlagsAttr defaultFlags{};
+  llvm::SmallVector<mlir::ValueRange> opBundleOps{};
   Value iglpValue =
       LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(value));
-  return rewriter.create<LLVM::CallIntrinsicOp>(
-      loc, TypeRange{}, intrinsicName, ValueRange{iglpValue}, defaultFlags);
+  return rewriter.create<LLVM::CallIntrinsicOp>(loc, TypeRange{}, intrinsicName,
+                                                ValueRange{iglpValue},
+                                                defaultFlags, opBundleOps);
 }
 
 struct InstructionSchedHintsRewriter

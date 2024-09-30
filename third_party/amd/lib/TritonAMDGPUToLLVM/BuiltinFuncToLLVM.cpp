@@ -189,8 +189,9 @@ private:
       assert(operands.size() == 2);
       auto name = StringAttr::get(callOp.getContext(), "llvm.amdgcn.rcp.f32");
       LLVM::FastmathFlagsAttr defaultFlags{};
+      llvm::SmallVector<mlir::ValueRange> opBundleOps{};
       auto rcpOp = rewriter.create<LLVM::CallIntrinsicOp>(
-          loc, returnType, name, operands[1], defaultFlags);
+          loc, returnType, name, operands[1], defaultFlags, opBundleOps);
 
       replacementOp = rewriter.create<LLVM::FMulOp>(
           loc, returnType, operands[0], rcpOp->getResult(0), defaultFlags);
