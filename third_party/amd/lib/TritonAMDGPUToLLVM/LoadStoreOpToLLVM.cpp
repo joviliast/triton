@@ -572,6 +572,7 @@ struct AtomicRMWOpConversion
     // vec = 1, numElements = 1 for scalar
     auto vec = getVectorSize(ptr);
     int numElems = 1;
+    bool forceF16packing = false;
     // tensor
     if (tensorTy) {
       auto valTy = cast<RankedTensorType>(val.getType());
@@ -580,6 +581,8 @@ struct AtomicRMWOpConversion
                                             elTy.getIntOrFloatBitWidth() == 16
                                         ? 2
                                         : 1);
+      forceF16packing = vec == 1 && llvm::isa<FloatType>(elTy) &&
+                        elTy.getIntOrFloatBitWidth() == 16;
       // mask
       numElems = tensorTy.getNumElements();
     }
@@ -587,6 +590,8 @@ struct AtomicRMWOpConversion
     auto tid = tid_val();
     mask = and_(mask,
                 icmp_slt(mul(tid, i32_val(elemsPerThread)), i32_val(numElems)));
+    if (forceF16packing)
+      mask = and_(mask, icmp_eq(urem(tid, i32_val(2)), i32_val(0)));
 
     auto memOrdering = op.getSem();
     auto atomicMemOrdering = getMemoryOrdering(memOrdering);
@@ -599,6 +604,37 @@ struct AtomicRMWOpConversion
       // TODO: in case llMask is zero we can create only one branch for all
       // elemsPerThread.
       Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
+
+      Value operand;
+      if (forceF16packing) {
+        Value old = f32_val(0);
+        int dppCtrl = 0x101;
+        int rowMask = 0b1111;
+        int bankMask = 0b1111;
+        bool boundCtrl = false;
+        Type packF16Ty = vec_ty(valueElemTy, 2);
+        val = undef(packF16Ty);
+        val = insert_element(packF16Ty, val, valElements[i], i32_val(0));
+        val = insert_element(packF16Ty, val, f16_val(0), i32_val(0));
+        val = bitcast(val, f32_ty);
+        auto dppMovOp = rewriter.create<ROCDL::DPPUpdateOp>(
+            loc, f32_ty, old, val, dppCtrl, rowMask, bankMask, boundCtrl);
+        operand = undef(packF16Ty);
+        operand =
+            insert_element(packF16Ty, operand, valElements[i], i32_val(0));
+        operand = insert_element(
+            packF16Ty, operand,
+            extract_element(f16_ty, bitcast(dppMovOp.getResult(), packF16Ty),
+                            i32_val(0)),
+            i32_val(1));
+      } else if (vec == 1) {
+        operand = valElements[i];
+      } else {
+        operand = undef(vecTy);
+        for (size_t ii = 0; ii < vec; ++ii)
+          operand =
+              insert_element(vecTy, operand, valElements[i + ii], i32_val(ii));
+      }
 
       Value undefVal = undef(retType);
       // Build blocks to bypass the atomic instruction for ~rmwMask.
@@ -616,21 +652,14 @@ struct AtomicRMWOpConversion
       auto maybeKind = matchAtomicOp(atomicRmwAttr);
       // TODO: use rocdl.raw.buffer.atomic from ROCDL dialect to use efficient
       // atomics for MI-* series of AMD GPU.
-      Value operand;
-      if (vec == 1) {
-        operand = valElements[i];
-      } else {
-        operand = undef(vecTy);
-        for (size_t ii = 0; ii < vec; ++ii)
-          operand =
-              insert_element(vecTy, operand, valElements[i + ii], i32_val(ii));
-      }
       Value atom =
           rewriter
               .create<LLVM::AtomicRMWOp>(loc, *maybeKind, rmwPtr, operand,
                                          atomicMemOrdering, StringRef("agent"))
               .getResult();
-
+      if (forceF16packing) {
+        atom = extract_element(valueElemTy, atom, i32_val(0));
+      }
       if (!tensorTy) {
         if (atomicNeedsSharedMemory(op.getResult())) {
           Value atomPtr =
@@ -643,11 +672,21 @@ struct AtomicRMWOpConversion
       rewriter.setInsertionPointToStart(endBlock);
       Value retVal = endBlock->getArgument(0);
       if (tensorTy) {
+        auto *curBlock = rewriter.getInsertionBlock();
+        auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+        auto *atomicBlock = rewriter.createBlock(
+            curBlock->getParent(), std::next(Region::iterator(curBlock)));
+
+        rewriter.setInsertionPointToEnd(curBlock);
+        rewriter.create<LLVM::CondBrOp>(
+            loc, icmp_eq(urem(tid, i32_val(2)), i32_val(1)), atomicBlock,
+            endBlock, undefVal);
         for (int ii = 0; ii < vec; ++ii) {
           resultVals[i + ii] =
               vec == 1 ? retVal
                        : extract_element(valueElemTy, retVal, i32_val(ii));
         }
+        rewriter.create<LLVM::BrOp>(loc, endBlock);
       } else {
         if (!atomicNeedsSharedMemory(op.getResult())) {
           rewriter.eraseOp(op);
