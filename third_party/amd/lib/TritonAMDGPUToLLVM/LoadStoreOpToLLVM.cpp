@@ -785,7 +785,7 @@ struct AtomicRMWOpConversion
     SmallVector<Value> resultVals(elemsPerThread);
     const bool f16v2 = vec == 2 && valueElemTy.isF16();
     for (size_t i = 0; i < elemsPerThread; i += vec) {
-      Value rmwPtr = ptrElements[i];
+      Value rmwPtr = addrspacecast(ptr_ty(ctx, 1), ptrElements[i]);
       // TODO: in case llMask is zero we can create only one branch for all
       // elemsPerThread.
       Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
