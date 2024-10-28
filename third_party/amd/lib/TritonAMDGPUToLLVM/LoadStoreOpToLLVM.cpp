@@ -817,13 +817,28 @@ struct AtomicRMWOpConversion
 
       rewriter.setInsertionPointToEnd(atomicBlock);
       auto maybeKind = matchAtomicOp(atomicRmwAttr);
-      // TODO: use rocdl.raw.buffer.atomic from ROCDL dialect to use efficient
-      // atomics for MI-* series of AMD GPU.
-      Value atom =
-          rewriter
-              .create<LLVM::AtomicRMWOp>(loc, *maybeKind, rmwPtr, operand,
-                                         atomicMemOrdering, StringRef("agent"))
-              .getResult();
+      Value atom;
+      // WA: generate AtomicRMWOp with not propper syncscope for atomicRMW add
+      // for int arguments. For some reason LLVM generates not the best
+      // configuration with syncscope == "agent". Build this case with
+      // configuration found by brute force for now. Investigation is in
+      // progeress. TODO: get rid of this dirty hack.
+      if (targetInfo.getISAFamily() == AMD::ISAFamily::CDNA3 && maybeKind &&
+          *maybeKind == LLVM::AtomicBinOp::add) {
+        atom = rewriter
+                   .create<LLVM::AtomicRMWOp>(loc, *maybeKind, rmwPtr, operand,
+                                              atomicMemOrdering,
+                                              StringRef("workgroup"))
+                   .getResult();
+      } else {
+        // TODO: use rocdl.raw.buffer.atomic from ROCDL dialect to use efficient
+        // atomics for MI-* series of AMD GPU.
+        atom = rewriter
+                   .create<LLVM::AtomicRMWOp>(loc, *maybeKind, rmwPtr, operand,
+                                              atomicMemOrdering,
+                                              StringRef("agent"))
+                   .getResult();
+      }
       if (!tensorTy) {
         if (atomicNeedsSharedMemory(op.getResult())) {
           Value atomPtr =
