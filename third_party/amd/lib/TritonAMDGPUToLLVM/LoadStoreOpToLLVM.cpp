@@ -752,10 +752,11 @@ struct AtomicRMWOpConversion
     auto valElements = unpackLLElements(loc, llVal, rewriter);
     auto ptrElements = unpackLLElements(loc, llPtr, rewriter);
     SmallVector<Value> maskElements;
-    if (llMask)
-      maskElements = unpackLLElements(loc, llMask, rewriter);
+    // if (llMask)
+    //   maskElements = unpackLLElements(loc, llMask, rewriter);
 
     Value opResult = op.getResult();
+    auto valueTy = op.getType();
     auto tensorTy = dyn_cast<RankedTensorType>(opResult.getType());
     Type valueElemTy =
         tensorTy ? getTypeConverter()->convertType(tensorTy.getElementType())
@@ -775,11 +776,10 @@ struct AtomicRMWOpConversion
                                         : 1);
       // mask
       numElems = tensorTy.getNumElements();
+    } else {
+      vec = 1;
     }
-    Value mask = int_val(1, 1);
-    auto tid = tid_val();
-    mask = and_(mask,
-                icmp_slt(mul(tid, i32_val(elemsPerThread)), i32_val(numElems)));
+    Value mask = icmp_eq(tid_val(), i32_val(0));
 
     auto memOrdering = op.getSem();
     auto atomicMemOrdering = getMemoryOrdering(memOrdering);
@@ -791,7 +791,7 @@ struct AtomicRMWOpConversion
       Value rmwPtr = ptrElements[i];
       // TODO: in case llMask is zero we can create only one branch for all
       // elemsPerThread.
-      Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
+      // Value rmwMask = llMask ? and_(mask, maskElements[i]) : mask;
 
       Value operand;
       if (vec == 1) {
@@ -812,7 +812,7 @@ struct AtomicRMWOpConversion
       endBlock->addArgument({retType}, {loc});
 
       rewriter.setInsertionPointToEnd(curBlock);
-      rewriter.create<LLVM::CondBrOp>(loc, rmwMask, atomicBlock, endBlock,
+      rewriter.create<LLVM::CondBrOp>(loc, mask, atomicBlock, endBlock,
                                       undefVal);
 
       rewriter.setInsertionPointToEnd(atomicBlock);
@@ -848,8 +848,8 @@ struct AtomicRMWOpConversion
         }
         Value atomPtr =
             getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
-        barrier();
         Value ret = load(valueElemTy, atomPtr);
+        barrier();
         rewriter.replaceOp(op, {ret});
       }
     }
