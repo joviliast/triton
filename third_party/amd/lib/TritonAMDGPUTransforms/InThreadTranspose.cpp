@@ -100,7 +100,7 @@ createInThreadTransposedEncoding(ArrayRef<int64_t> shape,
 
 void transposeInRegsitersBeforeLocalAlloc(ttg::LocalAllocOp alloc) {
   auto operand = alloc.getSrc();
-  OpBuilder builder(operand.getDefiningOp());
+  OpBuilder builder(alloc);
 
   auto operandType = alloc.getSrc().getType();
   auto operandEncoding =
@@ -132,7 +132,6 @@ void changeSharedEncoding(ttg::LocalAllocOp alloc) {
       originalType.getMemorySpace());
 
   alloc.getResult().setType(newType);
-  assert(false);
 }
 
 /// Structure describes operations involved in local_alloc->local_load pattern
@@ -188,19 +187,18 @@ matchThreadRakePattern(Value operand) {
   return pattern;
 }
 
-ttg::BlockedEncodingAttr getThreadRakedBlockedEnc(Value operand,
-                                                  ModuleOp &mod) {
+ttg::BlockedEncodingAttr
+getThreadRakedBlockedEnc(Value dotOperand, tt::LoadOp load, ModuleOp &mod) {
   // get the K dim according to dotOp operand's index
-  auto tensorTy = cast<RankedTensorType>(operand.getType());
+  auto tensorTy = cast<RankedTensorType>(dotOperand.getType());
   auto shape = tensorTy.getShape();
   auto opEnc = tensorTy.getEncoding();
   auto opDotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(opEnc);
   int kDimNum = opDotOpEnc.getOpIdx() == 0 ? 1 : 0;
   // get the current blocked encoding
-  auto cvtOperand = operand.getDefiningOp()->getOperand(0);
-  auto cvtOperandEnc =
-      cast<RankedTensorType>(cvtOperand.getType()).getEncoding();
-  auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(cvtOperandEnc);
+  auto loadResult = load.getResult();
+  auto loadEnc = cast<RankedTensorType>(loadResult.getType()).getEncoding();
+  auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(loadEnc);
   // compute the sizePerThread for the new encoding
   auto sizePerThread = blockedEnc.getSizePerThread();
   auto elemsPerIter = product(sizePerThread);
@@ -250,7 +248,8 @@ public:
         if (llvm::succeeded(matchResult)) {
           auto pattern = matchResult.value();
           LDBG("operand is K-outer");
-          auto newBlockedEnc = getThreadRakedBlockedEnc(operand, mod);
+          auto newBlockedEnc =
+              getThreadRakedBlockedEnc(operand, pattern.globalLoad, mod);
           LDBG("operand newBlockedEnc = " << newBlockedEnc);
           convertLayout(newBlockedEnc, (Operation *)pattern.globalLoad);
           transposeInRegsitersBeforeLocalAlloc(pattern.localAlloc);
