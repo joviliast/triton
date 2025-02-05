@@ -6,6 +6,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/LayoutUtils.h"
 #include "llvm/Support/Debug.h"
 
 #define DEBUG_TYPE "tritonamdgpu-in-thread-transpose"
@@ -18,6 +19,8 @@
 using namespace mlir;
 namespace tt = mlir::triton;
 namespace ttg = mlir::triton::gpu;
+
+namespace {
 
 static Type getNewType(Type type, Attribute encoding) {
   RankedTensorType tensorType = dyn_cast<RankedTensorType>(type);
@@ -67,76 +70,103 @@ void convertLayout(Attribute encoding, Operation *op) {
   op->erase();
 }
 
-SmallVector<Operation *> getLoadInsts(Operation *op) {
-  SmallVector<Operation *> ret;
-  auto v = op->getOperand(0);
-  auto prevOp = v.getDefiningOp();
-  if (isa<RegionBranchOpInterface>(prevOp)) {
-    // Deal with the case that convert_layout intakes from scf.if, etc.
-    LDBG("Dealing with scf blocks");
-    auto idx = cast<OpResult>(v).getResultNumber();
-    llvm::SmallVector<scf::YieldOp> yieldOps;
-    prevOp->walk([&](Operation *op) {
-      if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
-        yieldOps.push_back(yieldOp);
-      }
-    });
+ttg::LinearEncodingAttr
+createInThreadTransposedEncoding(ArrayRef<int64_t> shape,
+                                 ttg::BlockedEncodingAttr srcEncoding) {
+  auto srcLL = srcEncoding.toLinearLayout(shape);
+  SmallVector<unsigned> newInRegOrder(srcEncoding.getOrder());
+  int rank = shape.size();
+  std::swap(newInRegOrder[rank - 2], newInRegOrder[rank - 1]);
 
-    for (auto yieldOp : yieldOps) {
-      auto maybeLoadOp = yieldOp.getOperand(idx).getDefiningOp();
-      getLoadInsts(maybeLoadOp);
+  // Make in-register transposed tile
+  auto ctx = srcEncoding.getContext();
+  auto regDimName = StringAttr::get(ctx, "register");
+  auto inRegTransposeTile = tt::identityStandardND(
+      regDimName, srcEncoding.getSizePerThread(), newInRegOrder);
+
+  // Copy original bases, and replace register tile with new computed above
+  tt::LinearLayout::BasesT bases = srcLL.getBases();
+  for (auto &base : bases) {
+    auto dimName = base.first;
+    if (dimName == regDimName) {
+      int regsTransposed = inRegTransposeTile.getInDimSizeLog2(regDimName);
+      for (int i = 0; i < regsTransposed; ++i)
+        base.second[i] = inRegTransposeTile.getBasis(regDimName, i);
     }
-  } else if (isa<tt::LoadOp>(prevOp)) {
-    // regular case
-    ret.push_back(prevOp);
-  } else if (isa<ttg::LocalLoadOp>(op)) {
-    auto localAlloc = cast<ttg::LocalAllocOp>(prevOp);
-    ret.push_back(localAlloc.getSrc().getDefiningOp());
-  } else {
-    // can't find any loadOp
-    LDBG("we assume load->convert_layout->dot chain but we cannot find it.");
   }
-  return ret;
+  tt::LinearLayout transposedLL(
+      bases, SmallVector<StringAttr>(srcLL.getOutDimNames()));
+  return ttg::LinearEncodingAttr::get(ctx, transposedLL);
 }
 
-bool ableToConvertToThreadRaked(Value operand) {
+void transposeInRegsitersBeforeLocalAlloc(ttg::LocalAllocOp alloc) {
+  auto operand = alloc.getSrc();
+  OpBuilder builder(operand.getDefiningOp());
+
+  auto operandType = alloc.getSrc().getType();
+  auto operandEncoding =
+      cast<ttg::BlockedEncodingAttr>(operandType.getEncoding());
+  auto transposedEncoding =
+      createInThreadTransposedEncoding(operandType.getShape(), operandEncoding);
+  auto newType = getNewType(operand.getType(), transposedEncoding);
+  auto inThreadTransposed =
+      builder.create<ttg::ConvertLayoutOp>(alloc->getLoc(), newType, operand);
+  alloc.setOperand(0, inThreadTransposed);
+}
+
+void changeSharedEncoding(ttg::LocalAllocOp alloc) { assert(false); }
+
+/// Structure describes operations involved in local_alloc->local_load pattern
+struct loadStoreLoadChainComponents {
+  tt::LoadOp globalLoad;
+  ttg::LocalAllocOp localAlloc;
+  ttg::LocalLoadOp localLoad;
+};
+
+llvm::FailureOr<loadStoreLoadChainComponents>
+matchThreadRakePattern(Value operand) {
+  loadStoreLoadChainComponents pattern;
+  auto localLoadCandidate = operand.getDefiningOp();
+  pattern.localLoad = dyn_cast<ttg::LocalLoadOp>(localLoadCandidate);
+  if (!pattern.localLoad) {
+    LDBG("Did not find local load operation");
+    return failure();
+  }
+  auto localAllocCandidate = pattern.localLoad.getSrc().getDefiningOp();
+  pattern.localAlloc = dyn_cast<ttg::LocalAllocOp>(localAllocCandidate);
+  if (!pattern.localAlloc) {
+    LDBG("Did not find local alloc operation");
+    return failure();
+  }
+  auto loaded = pattern.localAlloc.getSrc();
+  pattern.globalLoad = dyn_cast<tt::LoadOp>(loaded.getDefiningOp());
+  if (!pattern.globalLoad) {
+    LDBG("Did not find global load operation");
+    return failure();
+  }
+
+  // TODO implement general heuristic,
+  // analyzing local load/store vectorization and estimating bank conflicts
   auto opTensorTy = cast<RankedTensorType>(operand.getType());
   auto opEnc = opTensorTy.getEncoding();
   auto opDotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(opEnc);
   if (!opDotOpEnc)
-    return false;
+    return failure();
   if (!isa<ttg::AMDMfmaEncodingAttr>(opDotOpEnc.getParent())) {
     LDBG("Operand's parent encoding is not MFMA");
-    return false;
+    return failure();
   }
-  Operation *operandDef = operand.getDefiningOp();
-  Value loaded;
-  if (auto localLoad = dyn_cast<ttg::LocalLoadOp>(operandDef)) {
-    auto localAlloc =
-        dyn_cast<ttg::LocalAllocOp>(localLoad.getSrc().getDefiningOp());
-    if (!localAlloc) {
-      LDBG("Unsupported operand's defining operation");
-      return false;
-    }
-    loaded = localAlloc.getSrc();
-  } else if (auto cvtOp = dyn_cast<ttg::ConvertLayoutOp>(operandDef)) {
-    loaded = cvtOp.getSrc();
-  } else {
-    LDBG("Unsupported operand's defining operation");
-    return false;
-  }
-
   auto loadedEnc = cast<RankedTensorType>(loaded.getType()).getEncoding();
   auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(loadedEnc);
   if (!blockedEnc)
-    return false;
+    return failure();
   int kDimNum = opDotOpEnc.getOpIdx() == 0 ? 1 : 0;
   auto order = blockedEnc.getOrder();
   if (order[0] != kDimNum) {
-    return true;
+    return failure();
   }
 
-  return false;
+  return pattern;
 }
 
 ttg::BlockedEncodingAttr getThreadRakedBlockedEnc(Value operand,
@@ -178,6 +208,8 @@ ttg::BlockedEncodingAttr getThreadRakedBlockedEnc(Value operand,
                                        threadsPerWarp, numCTAs);
 }
 
+} // namespace
+
 class TritonAMDGPUInThreadTransposePass
     : public TritonAMDGPUInThreadTransposeBase<
           TritonAMDGPUInThreadTransposePass> {
@@ -194,16 +226,16 @@ public:
 
       auto tryToConvertToThreadRaked = [&](Value operand) {
         LDBG("Consider " << operand);
-        bool performCvt = ableToConvertToThreadRaked(operand);
-        if (performCvt) {
+        // Dot operand
+        auto matchResult = matchThreadRakePattern(operand);
+        if (llvm::succeeded(matchResult)) {
+          auto pattern = matchResult.value();
           LDBG("operand is K-outer");
-          auto loadOps = getLoadInsts(operand.getDefiningOp());
-          if (!loadOps.size())
-            return;
           auto newBlockedEnc = getThreadRakedBlockedEnc(operand, mod);
           LDBG("operand newBlockedEnc = " << newBlockedEnc);
-          for (auto loadOp : loadOps)
-            convertLayout(newBlockedEnc, (Operation *)loadOp);
+          convertLayout(newBlockedEnc, (Operation *)pattern.globalLoad);
+          transposeInRegsitersBeforeLocalAlloc(pattern.localAlloc);
+          changeSharedEncoding(pattern.localAlloc);
         } else {
           LDBG("operand is K-inner and nothing to be done");
         }
