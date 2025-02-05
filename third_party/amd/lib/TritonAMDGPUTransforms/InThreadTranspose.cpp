@@ -83,19 +83,18 @@ createInThreadTransposedEncoding(ArrayRef<int64_t> shape,
   auto regDimName = StringAttr::get(ctx, "register");
   auto inRegTransposeTile = tt::identityStandardND(
       regDimName, srcEncoding.getSizePerThread(), newInRegOrder);
+  // make sure basis in same order as in srcLayout
+  SmallVector<StringAttr> outDimNames(srcLL.getOutDimNames());
+  inRegTransposeTile = inRegTransposeTile.transposeOuts(outDimNames);
 
-  // Copy original bases, and replace register tile with new computed above
+  // Copy original bases, and replace register tile with transposed one
   tt::LinearLayout::BasesT bases = srcLL.getBases();
-  for (auto &base : bases) {
-    auto dimName = base.first;
-    if (dimName == regDimName) {
-      int regsTransposed = inRegTransposeTile.getInDimSizeLog2(regDimName);
-      for (int i = 0; i < regsTransposed; ++i)
-        base.second[i] = inRegTransposeTile.getBasis(regDimName, i);
-    }
-  }
-  tt::LinearLayout transposedLL(
-      bases, SmallVector<StringAttr>(srcLL.getOutDimNames()));
+  auto &regBase = *bases.find(regDimName);
+  int regsTransposed = inRegTransposeTile.getInDimSizeLog2(regDimName);
+  for (int i = 0; i < regsTransposed; ++i)
+    regBase.second[i] = inRegTransposeTile.getBasis(regDimName, i);
+
+  tt::LinearLayout transposedLL(bases, SmallVector<StringAttr>(outDimNames));
   return ttg::LinearEncodingAttr::get(ctx, transposedLL);
 }
 
@@ -114,7 +113,27 @@ void transposeInRegsitersBeforeLocalAlloc(ttg::LocalAllocOp alloc) {
   alloc.setOperand(0, inThreadTransposed);
 }
 
-void changeSharedEncoding(ttg::LocalAllocOp alloc) { assert(false); }
+void changeSharedEncoding(ttg::LocalAllocOp alloc) {
+  auto originalType = cast<ttg::MemDescType>(alloc.getResult().getType());
+  auto sharedEnc =
+      cast<ttg::SwizzledSharedEncodingAttr>(originalType.getEncoding());
+  auto ctx = sharedEnc.getContext();
+  auto sharedVec = sharedEnc.getVec();
+  auto perPhase = sharedEnc.getPerPhase();
+  auto maxPhase = sharedEnc.getMaxPhase();
+  auto order = sharedEnc.getOrder();
+  auto ctaLayout = sharedEnc.getCTALayout();
+
+  // TODO replace SwizzledSharedEncodingAttr with special swizzling pattern
+  auto newSharedEnc = ttg::SwizzledSharedEncodingAttr::get(
+      ctx, sharedVec, perPhase, maxPhase, order, ctaLayout);
+  auto newType = ttg::MemDescType::get(
+      originalType.getShape(), originalType.getElementType(), newSharedEnc,
+      originalType.getMemorySpace());
+
+  alloc.getResult().setType(newType);
+  assert(false);
+}
 
 /// Structure describes operations involved in local_alloc->local_load pattern
 struct loadStoreLoadChainComponents {
