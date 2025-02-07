@@ -136,33 +136,111 @@ void changeSharedEncoding(ttg::LocalAllocOp alloc) {
 
 /// Structure describes operations involved in local_alloc->local_load pattern
 struct loadStoreLoadChainComponents {
-  tt::LoadOp globalLoad;
-  ttg::LocalAllocOp localAlloc;
-  ttg::LocalLoadOp localLoad;
+  SmallVector<tt::LoadOp> globalLoads;
+  SmallVector<ttg::LocalAllocOp> localAllocs;
+  SmallVector<ttg::LocalLoadOp> localLoads;
 };
+
+template <typename Op>
+void findAllDefiningOps(Value val, SmallVectorImpl<Op> &defs) {
+  if (auto castedOp = dyn_cast<Op>(val.getDefiningOp())) {
+    defs.push_back(castedOp); // Directly defined operation
+    return;
+  }
+
+  if (auto blockArg = dyn_cast<BlockArgument>(val)) {
+    Block *block = blockArg.getOwner();
+
+    // If block belongs to a function, stop tracking (function arguments)
+    if (block->isEntryBlock()) {
+      return; // Function arguments have no internal defining ops
+    }
+
+    // Get parent operation (e.g., scf.for, scf.if, scf.while)
+    Operation *parentOp = block->getParentOp();
+    if (!parentOp)
+      return;
+
+    int argIdx = blockArg.getArgNumber();
+
+    // Handle `scf.for`
+    if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
+      int iterArgIdx = argIdx - 1; // Skip induction variable
+      if (iterArgIdx >= 0) {
+        Value yieldVal =
+            forOp.getBody()->getTerminator()->getOperand(iterArgIdx);
+        findAllDefiningOps(yieldVal, defs);
+      } else {
+        findAllDefiningOps(forOp.getOperand(0), defs); // Induction variable
+      }
+      return;
+    }
+
+    // Handle `scf.if`
+    if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
+      auto thenYield = ifOp.thenYield();
+      auto elseYield = ifOp.elseYield();
+
+      // Track all possible yielded values from then/else blocks
+      if (thenYield)
+        findAllDefiningOps(thenYield->getOperand(argIdx), defs);
+      if (elseYield)
+        findAllDefiningOps(elseYield->getOperand(argIdx), defs);
+      return;
+    }
+
+    // Handle `scf.while`
+    if (auto whileOp = dyn_cast<scf::WhileOp>(parentOp)) {
+      findAllDefiningOps(
+          whileOp.getBefore().front().getTerminator()->getOperand(argIdx),
+          defs);
+      return;
+    }
+
+    if (isa<RegionBranchOpInterface>(parentOp)) {
+      // Deal with the case that convert_layout intakes from scf.if, etc.
+      llvm::SmallVector<scf::YieldOp> yieldOps;
+      parentOp->walk([&](Operation *op) {
+        if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
+          yieldOps.push_back(yieldOp);
+        }
+      });
+
+      for (auto yieldOp : yieldOps) {
+        findAllDefiningOps(yieldOp.getOperand(argIdx), defs);
+      }
+      return;
+    }
+
+    // Otherwise, track the operand in the parent operation
+    findAllDefiningOps(parentOp->getOperand(argIdx), defs);
+  }
+}
+
+/*template <typename Op>
+void fillVecWithDefiningPreds(Value v, SmallVector<Op> &defs) {
+  auto prevOp = findAllDefiningOps(v, defs);
+  if (auto castedOp = dyn_cast<Op>(prevOp)) {
+    defs.push_back(castedOp);
+  } else if (isa<RegionBranchOpInterface>(prevOp)) {
+    // Deal with the case that convert_layout intakes from scf.if, etc.
+    LDBG("Dealing with scf blocks");
+    auto idx = cast<OpResult>(v).getResultNumber();
+    llvm::SmallVector<scf::YieldOp> yieldOps;
+    prevOp->walk([&](Operation *op) {
+      if (auto yieldOp = dyn_cast<scf::YieldOp>(op)) {
+        yieldOps.push_back(yieldOp);
+      }
+    });
+
+    for (auto yieldOp : yieldOps) {
+      fillVecWithDefiningPreds<Op>(yieldOp.getOperand(idx), defs);
+    }
+  }
+}*/
 
 llvm::FailureOr<loadStoreLoadChainComponents>
 matchThreadRakePattern(Value operand) {
-  loadStoreLoadChainComponents pattern;
-  auto localLoadCandidate = operand.getDefiningOp();
-  pattern.localLoad = dyn_cast<ttg::LocalLoadOp>(localLoadCandidate);
-  if (!pattern.localLoad) {
-    LDBG("Did not find local load operation");
-    return failure();
-  }
-  auto localAllocCandidate = pattern.localLoad.getSrc().getDefiningOp();
-  pattern.localAlloc = dyn_cast<ttg::LocalAllocOp>(localAllocCandidate);
-  if (!pattern.localAlloc) {
-    LDBG("Did not find local alloc operation");
-    return failure();
-  }
-  auto loaded = pattern.localAlloc.getSrc();
-  pattern.globalLoad = dyn_cast<tt::LoadOp>(loaded.getDefiningOp());
-  if (!pattern.globalLoad) {
-    LDBG("Did not find global load operation");
-    return failure();
-  }
-
   // TODO implement general heuristic,
   // analyzing local load/store vectorization and estimating bank conflicts
   auto opTensorTy = cast<RankedTensorType>(operand.getType());
@@ -170,17 +248,44 @@ matchThreadRakePattern(Value operand) {
   auto opDotOpEnc = dyn_cast<ttg::DotOperandEncodingAttr>(opEnc);
   if (!opDotOpEnc)
     return failure();
-  if (!isa<ttg::AMDMfmaEncodingAttr>(opDotOpEnc.getParent())) {
+
+  int kDimNum = opDotOpEnc.getOpIdx() == 0 ? 1 : 0;
+  // TODO: support wmma
+  if (!isa<ttg::AMDMfmaEncodingAttr, ttg::AMDWmmaEncodingAttr>(
+          opDotOpEnc.getParent())) {
     LDBG("Operand's parent encoding is not MFMA");
     return failure();
   }
-  auto loadedEnc = cast<RankedTensorType>(loaded.getType()).getEncoding();
-  auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(loadedEnc);
-  if (!blockedEnc)
+  loadStoreLoadChainComponents pattern;
+  findAllDefiningOps(operand, pattern.localLoads);
+  if (pattern.localLoads.empty()) {
+    LDBG("Did not find local load operation");
     return failure();
-  int kDimNum = opDotOpEnc.getOpIdx() == 0 ? 1 : 0;
-  auto order = blockedEnc.getOrder();
-  if (order[0] != kDimNum) {
+  }
+
+  printf("problem\n");
+  // need to provide proper logic for defining operation search in a loop
+  for (auto lLoad : pattern.localLoads) {
+    findAllDefiningOps(lLoad.getSrc(), pattern.localAllocs);
+  }
+  if (pattern.localAllocs.empty()) {
+    LDBG("Did not find local alloc operation");
+    return failure();
+  }
+  for (auto lAlloc : pattern.localAllocs) {
+    auto loaded = lAlloc.getSrc();
+    auto loadedEnc = cast<RankedTensorType>(loaded.getType()).getEncoding();
+    auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(loadedEnc);
+    if (!blockedEnc)
+      return failure();
+    auto order = blockedEnc.getOrder();
+    if (order[0] != kDimNum) {
+      return failure();
+    }
+    findAllDefiningOps(loaded, pattern.globalLoads);
+  }
+  if (pattern.globalLoads.empty()) {
+    LDBG("Did not find global load operation");
     return failure();
   }
 
@@ -245,17 +350,22 @@ public:
         LDBG("Consider " << operand);
         // Dot operand
         auto matchResult = matchThreadRakePattern(operand);
-        if (llvm::succeeded(matchResult)) {
-          auto pattern = matchResult.value();
-          LDBG("operand is K-outer");
-          auto newBlockedEnc =
-              getThreadRakedBlockedEnc(operand, pattern.globalLoad, mod);
-          LDBG("operand newBlockedEnc = " << newBlockedEnc);
-          convertLayout(newBlockedEnc, (Operation *)pattern.globalLoad);
-          transposeInRegsitersBeforeLocalAlloc(pattern.localAlloc);
-          changeSharedEncoding(pattern.localAlloc);
-        } else {
+        if (!llvm::succeeded(matchResult)) {
           LDBG("operand is K-inner and nothing to be done");
+          return;
+        }
+        assert(false);
+        auto pattern = matchResult.value();
+        LDBG("operand is K-outer");
+        for (auto gLoad : pattern.globalLoads) {
+          auto newBlockedEnc = getThreadRakedBlockedEnc(operand, gLoad, mod);
+          LDBG("operand newBlockedEnc = " << newBlockedEnc);
+          convertLayout(newBlockedEnc, (Operation *)gLoad);
+        }
+
+        for (auto lAlloc : pattern.localAllocs) {
+          transposeInRegsitersBeforeLocalAlloc(lAlloc);
+          changeSharedEncoding(lAlloc);
         }
       };
       // Check opA
