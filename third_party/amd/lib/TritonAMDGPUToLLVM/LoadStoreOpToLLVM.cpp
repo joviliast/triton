@@ -1120,25 +1120,26 @@ bool supportsGlobalAtomicF16PackedAndDpp(ISAFamily isaFamily) {
   return false;
 }
 
-Value generateI32DppMove(PatternRewriter &rewriter, Value val, int dppCtrl) {
-  assert(val.getType().isInteger(32));
+Value generateIntDppMove(PatternRewriter &rewriter, Value val, int dppCtrl) {
+  Type movedTy = val.getType();
+  assert(movedTy.isInteger());
   auto loc = val.getLoc();
   auto b = TritonLLVMOpBuilder(loc, rewriter);
-  Value old = b.i32_val(0);
+  Value old = b.int_val(movedTy.getIntOrFloatBitWidth(), 0);
   int rowMask = 0b1111;  // enable all rows
   int bankMask = 0b1111; // enable all banks
   bool boundCtrl = false;
   auto dppMovOp = rewriter.create<ROCDL::DPPUpdateOp>(
-      loc, i32_ty, old, val, dppCtrl, rowMask, bankMask, boundCtrl);
+      loc, movedTy, old, val, dppCtrl, rowMask, bankMask, boundCtrl);
   return dppMovOp.getResult();
 }
 
-Value shiftLeftI32ByDpp(PatternRewriter &rewriter, Value val) {
-  return generateI32DppMove(rewriter, val, 0x101); // shift left 1 lane
+Value shiftLeftIntByDpp(PatternRewriter &rewriter, Value val, int step = 1) {
+  return generateIntDppMove(rewriter, val, 0x100 + step); // shift left
 }
 
-Value shiftRightI32ByDpp(PatternRewriter &rewriter, Value val) {
-  return generateI32DppMove(rewriter, val, 0x111); // shift right 1 lane
+Value shiftRightIntByDpp(PatternRewriter &rewriter, Value val, int step = 1) {
+  return generateIntDppMove(rewriter, val, 0x110 + step); // shift right
 }
 
 Value generatePopcount64(PatternRewriter &rewriter, Value val) {
@@ -1202,6 +1203,117 @@ Value genI32TiledOp(PatternRewriter &rewriter, Generator genCall,
     vec = b.insert_element(i32VecValTy, vec, result, b.i32_val(i));
   }
   return b.bitcast(vec, ty);
+}
+
+void generateBitonicSort(PatternRewriter &rewriter, Value key, Value val) {
+  // todo: extend logic to block size
+  // get warp size
+  auto loc = val.getLoc();
+  auto b = TritonLLVMOpBuilder(loc, rewriter);
+  auto tid = getThreadId(rewriter, loc);
+  int warpSize = 64;
+  Value warpSize_ = b.i32_val(warpSize);
+  Value laneId = b.urem(tid, warpSize_);
+  int keyBitWidth = key.getType().getIntOrFloatBitWidth();
+  int valBitWidth = val.getType().getIntOrFloatBitWidth();
+
+  auto bitonicIter = [&](int j, int k, Value keyIntermediate,
+                         Value valIntermediate) {
+    Value cmpKey, cmpVal;
+    Value permuteToComparerAddr =
+        b.mul(b.sub(laneId, b.i32_val(j)), b.i32_val(4));
+    Value permuteToComparableAddr =
+        b.mul(b.add(laneId, b.i32_val(j)), b.i32_val(4));
+    // Each iteration requires grouping of threads by pairs. Calculate idx of
+    // paired thread:
+    Value ij = b.xor_(laneId, b.i32_val(j));
+    // Send self key and value to thread which will compare them
+    if (k <= 16) {
+      cmpKey = genI32TiledOp(rewriter, shiftLeftIntByDpp, keyIntermediate, j);
+      cmpVal = genI32TiledOp(rewriter, shiftLeftIntByDpp, valIntermediate, j);
+    } else if (k <= 64) {
+      cmpKey = genI32TiledOp(rewriter, genPermute, keyIntermediate,
+                             permuteToComparerAddr);
+      cmpVal = genI32TiledOp(rewriter, genPermute, valIntermediate,
+                             permuteToComparerAddr);
+    } else {
+      llvm_unreachable("interwarp communication logic is not implemented yet "
+                       "for the algorithm");
+    }
+    // One of the threads takes responsibility to swap values if one less than
+    // another. Build following construction: if (ij > laneId &&              -
+    // take threads with less laneId
+    //     (laneId & k == 0 &&         - build decreasing subsequence
+    //      localKey > receivedKey) ||
+    //     (laneId & k != 0 &&         - build increasing subsequence
+    //      receivedKey > localKey)) {
+    //   swap(localKey, receivedKey)
+    //   swap(localVal, receivedVal)
+    // }
+    Value cond = b.icmp_sgt(ij, laneId);
+    cond = b.and_(
+        cond,
+        b.or_(b.and_(b.icmp_eq(b.and_(laneId, b.i32_val(k)), b.i32_val(0)),
+                     b.icmp_sgt(keyIntermediate, cmpKey)),
+              b.and_(b.icmp_ne(b.and_(laneId, b.i32_val(k)), b.i32_val(0)),
+                     b.icmp_sgt(cmpKey, keyIntermediate))));
+    auto *curBlock = rewriter.getInsertionBlock();
+    auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *bitIterBlock = rewriter.createBlock(
+        curBlock->getParent(), std::next(Region::iterator(curBlock)));
+    endBlock->addArgument(cmpKey.getType(), loc);
+    endBlock->addArgument(cmpVal.getType(), loc);
+
+    rewriter.setInsertionPointToEnd(curBlock);
+    rewriter.create<LLVM::CondBrOp>(loc, cond, bitIterBlock, endBlock,
+                                    ValueRange({cmpKey, cmpVal}));
+
+    rewriter.setInsertionPointToEnd(bitIterBlock);
+
+    // On the practice, instead of swapping we just call next basic block with
+    // different arguments.
+    rewriter.create<LLVM::BrOp>(
+        loc, ValueRange({keyIntermediate, valIntermediate}), endBlock);
+    rewriter.setInsertionPointToStart(endBlock);
+
+    if (k <= 16) {
+      cmpKey = genI32TiledOp(rewriter, shiftRightIntByDpp,
+                             endBlock->getArgument(0), j);
+      cmpVal = genI32TiledOp(rewriter, shiftRightIntByDpp,
+                             endBlock->getArgument(1), j);
+    } else if (k <= 64) {
+      cmpKey = genI32TiledOp(rewriter, genPermute, endBlock->getArgument(0),
+                             permuteToComparableAddr);
+      cmpVal = genI32TiledOp(rewriter, genPermute, endBlock->getArgument(1),
+                             permuteToComparableAddr);
+    } else {
+      llvm_unreachable("interwarp communication logic is not implemented yet "
+                       "for the algorithm");
+    }
+    curBlock = endBlock;
+    endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    auto *setToComparableBlock = rewriter.createBlock(
+        curBlock->getParent(), std::next(Region::iterator(curBlock)));
+
+    rewriter.setInsertionPointToEnd(curBlock);
+
+    // Threads with larger laneId should update their values
+    cond = b.icmp_sle(ij, laneId);
+    rewriter.create<LLVM::CondBrOp>(loc, cond, setToComparableBlock, endBlock);
+
+    rewriter.setInsertionPointToEnd(setToComparableBlock);
+    keyIntermediate = cmpKey;
+    valIntermediate = cmpVal;
+    rewriter.create<LLVM::BrOp>(loc, endBlock);
+    rewriter.setInsertionPointToStart(endBlock);
+  };
+
+  // Generate 21 iterations for 64 threads
+  for (int k = 0b10; k <= warpSize; k <<= 1) {
+    for (int j = k >> 1; j > 0; j >>= 1) {
+      bitonicIter(j, k, key, val);
+    }
+  }
 }
 
 struct AtomicRMWOpConversion
@@ -1364,10 +1476,10 @@ struct AtomicRMWOpConversion
         packedVal = b.bitcast(packedVal, i32_ty);
         // Zero operands for disabled threads to make addition no op.
         packedVal = b.select(rmwMask, packedVal, b.i32_val(0));
-        Value dppMoveRes = shiftLeftI32ByDpp(rewriter, packedVal);
+        Value dppMoveRes = shiftLeftIntByDpp(rewriter, packedVal);
 
         Value rightNeighbourAddr =
-            genI32TiledOp(rewriter, shiftLeftI32ByDpp, castedAddr);
+            genI32TiledOp(rewriter, shiftLeftIntByDpp, castedAddr, 1);
 
         // Packing optimization only supported if following conditions are true:
         // 1. address is aligned by 4 bytes
@@ -1406,26 +1518,24 @@ struct AtomicRMWOpConversion
                                      b.i32_val(ii));
       }
 
-      Value undefVal = b.undef(retType);
-      // Build blocks to bypass the atomic instruction for ~rmwMask.
-      auto *curBlock = rewriter.getInsertionBlock();
-      auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
-      auto *atomicBlock = rewriter.createBlock(
-          curBlock->getParent(), std::next(Region::iterator(curBlock)));
-      endBlock->addArgument({retType}, {loc});
-
-      rewriter.setInsertionPointToEnd(curBlock);
-      rewriter.create<LLVM::CondBrOp>(loc, rmwMask, atomicBlock, endBlock,
-                                      undefVal);
-
-      rewriter.setInsertionPointToEnd(atomicBlock);
       auto maybeKind = matchAtomicOp(atomicRmwAttr);
-      Value atom;
-      Value isVecOp;
+      Value retVal;
       if (enableIntraWaveReduce) {
-        atom = atomicIntraWaveReduce(rewriter, rmwPtr, operand, *maybeKind,
-                                     atomicMemOrdering, *scopeStr);
+        retVal = atomicIntraWaveReduce(rewriter, rmwPtr, operand, *maybeKind,
+                                       atomicMemOrdering, *scopeStr, rmwMask);
       } else {
+        Value undefVal = b.undef(retType);
+        // Build blocks to bypass the atomic instruction for ~rmwMask.
+        auto *curBlock = rewriter.getInsertionBlock();
+        auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+        auto *atomicBlock = rewriter.createBlock(
+            curBlock->getParent(), std::next(Region::iterator(curBlock)));
+        endBlock->addArgument({retType}, {loc});
+        rewriter.setInsertionPointToEnd(curBlock);
+        rewriter.create<LLVM::CondBrOp>(loc, rmwMask, atomicBlock, endBlock,
+                                        undefVal);
+
+        rewriter.setInsertionPointToEnd(atomicBlock);
         if (useDppForPackedF16) {
           // Determine on the runtime what atomic intrinsic to execute:
           // packed or regular.
@@ -1460,27 +1570,27 @@ struct AtomicRMWOpConversion
           // Start to fill out the packed block.
           rewriter.setInsertionPointToEnd(packedBlock);
         }
-        atom = rewriter.create<LLVM::AtomicRMWOp>(
+        Value atom = rewriter.create<LLVM::AtomicRMWOp>(
             loc, *maybeKind, rmwPtr, operand, atomicMemOrdering, *scopeStr);
-      }
 
-      if (!tensorTy) {
-        if (atomicNeedsSharedMemory(op.getResult())) {
-          Value atomPtr =
-              getSharedMemoryBase(loc, rewriter, targetInfo, op.getOperation());
-          b.store(atom, atomPtr);
+        if (!tensorTy) {
+          if (atomicNeedsSharedMemory(op.getResult())) {
+            Value atomPtr = getSharedMemoryBase(loc, rewriter, targetInfo,
+                                                op.getOperation());
+            b.store(atom, atomPtr);
+          }
         }
+        rewriter.create<LLVM::BrOp>(loc, atom, endBlock);
+        rewriter.setInsertionPointToStart(endBlock);
+        retVal = endBlock->getArgument(0);
       }
-      rewriter.create<LLVM::BrOp>(loc, atom, endBlock);
 
-      rewriter.setInsertionPointToStart(endBlock);
-      Value retVal = endBlock->getArgument(0);
       if (tensorTy) {
         if (useDppForPackedF16) {
           // Return packed to i32 result after atomic operation back from master
           // lane.
           auto packedRet = b.bitcast(retVal, i32_ty);
-          Value dppMovRes = shiftRightI32ByDpp(rewriter, packedRet);
+          Value dppMovRes = shiftRightIntByDpp(rewriter, packedRet);
           // Unpack results back
           Value unpackedDppRes = b.bitcast(dppMovRes, packF16Ty);
           retVal = b.insert_element(
@@ -1521,8 +1631,8 @@ struct AtomicRMWOpConversion
 private:
   Value atomicIntraWaveReduce(PatternRewriter &rewriter, Value rmwPtr,
                               Value operand, LLVM::AtomicBinOp opKind,
-                              LLVM::AtomicOrdering memOrdering,
-                              StringRef scope) const {
+                              LLVM::AtomicOrdering memOrdering, StringRef scope,
+                              Value rmwMask) const {
     // This approach minimizes intra-warp thread contention when accessing
     // global memory pointers. It is particularly advantageous for certain ISA
     // families, such as CDNA3. The algorithm follows these steps:
@@ -1540,127 +1650,112 @@ private:
     //    Apply `bpermute` and operation-specific arithmetic based on the opKind
     //    to consolidate group data into leader threads.
     // 5. Perform global atomic operations by leader threads.
+
+    /////////////
+    // Following approach allows to minimize intra-warp threads competition to
+    // access to global memory pointers.
+    // Algorithm description:
+    // 1. Sort {ptr, operand} among the threads within the warp
+    // 2. Distribute threads between groups defined by pointers
+    // 3. Select master thread for each group
+    // 4. Collect partial sum in LDS for each group
+    // 5. Utilize global atomic operation for each group by master threads
     auto loc = operand.getLoc();
     auto b = TritonLLVMOpBuilder(loc, rewriter);
+    auto tid = getThreadId(rewriter, loc);
     Type operandElemType = operand.getType();
-    Type origPtrType = rmwPtr.getType();
+    const size_t valueElemNbits = operandElemType.getIntOrFloatBitWidth();
 
+    Type origPtrType = rmwPtr.getType();
+    if (!operandElemType.isInteger())
+      operand = b.bitcast(operand, int_ty(valueElemNbits));
+
+    Value allBits = b.i64_val(~uint64_t(0));
     rmwPtr = b.ptrtoint(i64_ty, rmwPtr);
+    // Set all bits for disabled threads as address. Practically address is
+    // limited by 192GB
+    rmwPtr = b.select(rmwMask, rmwPtr, allBits);
+    // Sorting is done with bitonic sort implemented with dpp.
+    generateBitonicSort(rewriter, rmwPtr, operand);
+
+    if (!operandElemType.isInteger())
+      operand = b.bitcast(operand, operandElemType);
 
     auto *curBlock = rewriter.getInsertionBlock();
-    auto *afterLoopBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
-    afterLoopBlock->addArgument(i32_ty, loc);    // idx
-    afterLoopBlock->addArgument(i32_ty, loc);    // cnt
-    afterLoopBlock->addArgument(int_ty(1), loc); // isLeader
-    auto *loopBody = rewriter.createBlock(
+    auto *endBlock = curBlock->splitBlock(rewriter.getInsertionPoint());
+    endBlock->addArgument(operandElemType, loc);
+    auto *checkCondBlock = rewriter.createBlock(
         curBlock->getParent(), std::next(Region::iterator(curBlock)));
-    loopBody->addArgument(i32_ty, loc); // base
+    // Skip everything if thread is disabled
     rewriter.setInsertionPointToEnd(curBlock);
-    rewriter.create<LLVM::BrOp>(loc, b.i32_val(0), loopBody);
+    Value isEnabled = b.icmp_ne(rmwPtr, allBits);
+    Value defaultRes = b.undef(operandElemType);
 
-    // Greed search of same addr within wavefront. Also collect auxiliary
-    // information about relative position:
-    // - idx in a group + base laneId. This param is required to form continuous
-    //   groups further;
-    // - cnt of remaining threads in a group after current thread;
-    // - leadership status of the current thread.
-    rewriter.setInsertionPointToEnd(loopBody);
-    // `readfirstlane` considers only enabled threads
-    Value chosen = genI32TiledOp(rewriter, genReadFirstLane, rmwPtr);
-    // this flag is required to disable thread if we have already checked its
-    // pointer
-    Value done = b.icmp_eq(chosen, rmwPtr);
-    Value mask = targetInfo.ballot(rewriter, loc, i64_ty, done);
-    Value start = loopBody->getArgument(0);
-    Value cnt = b.trunc(i32_ty, generatePopcount64(rewriter, mask));
-    Value mbcntLoRes = rewriter
-                           .create<ROCDL::MbcntLoOp>(
-                               loc, i32_ty, b.trunc(i32_ty, mask), b.i32_val(0))
-                           ->getResult(0);
-    Value idx = rewriter.create<ROCDL::MbcntHiOp>(
-        loc, i32_ty, b.trunc(i32_ty, b.lshr(mask, b.i64_val(32))), mbcntLoRes);
-    Value base = b.add(start, cnt);
-    Value leader = b.icmp_eq(idx, b.i32_val(0));
-    cnt = b.sub(cnt, idx);
-    idx = b.add(idx, start);
-    rewriter.create<LLVM::CondBrOp>(loc, done, afterLoopBlock,
-                                    ValueRange({idx, cnt, leader}), loopBody,
-                                    ValueRange({base}));
+    Value warpSize = b.i32_val(64);
+    Value lastLaneId = b.sub(warpSize, b.i32_val(1));
+    Value laneId = b.urem(tid, warpSize);
+    // Use DPP to check neighbors
+    Value next = genI32TiledOp(rewriter, generateIntDppMove, rmwPtr,
+                               0x130); // shift wave left
+    // Consider last thread in the group as a leader
+    Value isLeader =
+        b.or_(b.icmp_eq(laneId, lastLaneId), b.icmp_ne(next, rmwPtr));
+    Value leaderMask = targetInfo.ballot(rewriter, loc, i64_ty, isLeader);
+    rewriter.create<LLVM::CondBrOp>(loc, isEnabled, checkCondBlock, endBlock,
+                                    defaultRes);
+    rewriter.setInsertionPointToEnd(checkCondBlock);
 
-    rewriter.setInsertionPointToEnd(afterLoopBlock);
+    Value leaderNum = generatePopcount64(rewriter, leaderMask);
 
-    Value idxRes = afterLoopBlock->getArgument(0);
-    Value cntRes = afterLoopBlock->getArgument(1);
-    Value leaderRes = afterLoopBlock->getArgument(2);
-    Value idxScaledForPermute = b.mul(idxRes, b.i32_val(4));
+    // Heuristic:
+    // Apply intra-wave reduction only if number of groups less then 32
+    Value reductionCond = b.icmp_slt(leaderNum, b.i64_val(32));
 
-    // Make groups continuous
-    rmwPtr = genI32TiledOp(rewriter, genPermute, rmwPtr, idxScaledForPermute);
-    operand = genI32TiledOp(rewriter, genPermute, operand, idxScaledForPermute);
-    // Actualize auxiliary info as well
-    Value packedRoleInfo = genI32TiledOp(
-        rewriter, genPermute,
-        b.or_(b.zext(i32_ty, leaderRes),
-              b.or_(idxScaledForPermute, b.shl(cntRes, b.i32_val(8)))),
-        idxScaledForPermute);
-    idxScaledForPermute = packedRoleInfo;
-    cntRes = b.and_(b.lshr(packedRoleInfo, b.i32_val(8)), b.i32_val(0xff));
-    leaderRes = b.icmp_ne(b.and_(packedRoleInfo, b.i32_val(1)), b.i32_val(0));
-
-    auto *afterRedBlock =
-        afterLoopBlock->splitBlock(rewriter.getInsertionPoint());
-    afterRedBlock->addArgument(operandElemType, loc);
+    auto *leaderBlock =
+        checkCondBlock->splitBlock(rewriter.getInsertionPoint());
+    leaderBlock->addArgument(operandElemType, loc);
     auto *partialReductionBlock =
-        rewriter.createBlock(afterLoopBlock->getParent(),
-                             std::next(Region::iterator(afterLoopBlock)));
-    rewriter.setInsertionPointToEnd(afterLoopBlock);
-    Value reductionCond =
-        b.icmp_ne(targetInfo.ballot(rewriter, loc, i64_ty,
-                                    b.icmp_ne(cntRes, b.i32_val(1))),
-                  b.i64_val(0));
+        rewriter.createBlock(checkCondBlock->getParent(),
+                             std::next(Region::iterator(checkCondBlock)));
+    rewriter.setInsertionPointToEnd(checkCondBlock);
     rewriter.create<LLVM::CondBrOp>(loc, reductionCond, partialReductionBlock,
-                                    afterRedBlock, operand);
+                                    leaderBlock, operand);
     rewriter.setInsertionPointToEnd(partialReductionBlock);
 
-    auto performOpIfCond = [&](Value res, Value v, Value cond) -> Value {
-      Type ty = v.getType();
-      assert(ty == res.getType());
-      Value notCond = b.icmp_eq(cond, b.false_val());
+    Value idxScaledForPermute = b.mul(laneId, b.i32_val(4));
+
+    // Calculate a number of remaining lanes in the group after current one.
+    Value remainingLeaderMask =
+        b.shl(leaderMask, b.zext(i64_ty, b.sub(warpSize, laneId)));
+    // No need to compare to zero. Last bit must be always set.
+    Value remainingLanesInGroup =
+        LLVM::createLLVMIntrinsicCallOp(
+            rewriter, loc, "llvm.ctlz.i64", i64_ty,
+            ValueRange{remainingLeaderMask, b.false_val()})
+            ->getResult(0);
+    remainingLanesInGroup =
+        b.umin(b.zext(i64_ty, laneId), remainingLanesInGroup);
+
+    auto performRmwOp = [&](Value res, Value v) -> Value {
       switch (opKind) {
       case LLVM::AtomicBinOp::_and:
-        // res &= cond ? v : 1111..
-        return b.and_(res,
-                      b.or_(v, b.sub(b.int_val(ty.getIntOrFloatBitWidth(), 0),
-                                     b.zext(ty, notCond))));
+        return b.and_(res, v);
       case LLVM::AtomicBinOp::_or:
-        // res |= cond ? v : 0
-        return b.or_(res, b.mul(v, b.zext(ty, cond)));
+        return b.or_(res, v);
       case LLVM::AtomicBinOp::_xor:
-        // res ^= cond ? v : 0
-        return b.xor_(res, b.mul(v, b.zext(ty, cond)));
+        return b.xor_(res, v);
       case LLVM::AtomicBinOp::add:
-        // res += cond ? v : 0
-        return b.add(res, b.mul(v, b.zext(ty, cond)));
+        return b.add(res, v);
       case LLVM::AtomicBinOp::fadd:
-        // res += cond ? v : 0
-        return b.fadd(
-            res, b.fmul(v, b.inttofloat(
-                               ty, b.zext(int_ty(ty.getIntOrFloatBitWidth()),
-                                          cond))));
+        return b.fadd(res, v);
       case LLVM::AtomicBinOp::max:
       case LLVM::AtomicBinOp::umax:
-        // res = cond ? umax(v, res) : res
-        return b.or_(b.mul(res, b.zext(ty, notCond)),
-                     b.mul(b.umax(v, res), b.zext(ty, cond)));
+        return b.umax(v, res);
       case LLVM::AtomicBinOp::min:
       case LLVM::AtomicBinOp::umin:
-        // res = cond ? umin(v, res) : res
-        return b.or_(b.mul(res, b.zext(ty, notCond)),
-                     b.mul(b.umin(v, res), b.zext(ty, cond)));
+        return b.umin(v, res);
       case LLVM::AtomicBinOp::xchg:
-        // res = cond ? v : res
-        return b.or_(b.mul(res, b.zext(ty, notCond)),
-                     b.mul(v, b.zext(ty, cond)));
+        return v;
       default:
         llvm_unreachable("Unsupported atomic binary operation.");
       }
@@ -1669,27 +1764,18 @@ private:
     // Reduce to leader thread
     for (int i = 32; i != 0; i /= 2) {
       Value tmp = genI32TiledOp(rewriter, genBPermute, acc,
-                                b.add(idxScaledForPermute, b.i32_val(i * 4)));
-      acc = performOpIfCond(acc, tmp, b.icmp_ult(b.i32_val(i), cntRes));
+                                b.sub(idxScaledForPermute, b.i32_val(i * 4)));
+      acc = b.select(b.icmp_sle(b.i64_val(i), remainingLanesInGroup),
+                     performRmwOp(acc, tmp), acc);
     }
-
-    rewriter.create<LLVM::BrOp>(loc, acc, afterRedBlock);
-    rewriter.setInsertionPointToEnd(afterRedBlock);
-
-    auto *endBlock = afterRedBlock->splitBlock(rewriter.getInsertionPoint());
-    endBlock->addArgument(operandElemType, loc);
-    auto *leaderBlock = rewriter.createBlock(
-        afterRedBlock->getParent(), std::next(Region::iterator(afterRedBlock)));
-    rewriter.setInsertionPointToEnd(afterRedBlock);
-    Value leaderCond = leaderRes;
-    Value defaultRes = b.undef(operandElemType);
-    rewriter.create<LLVM::CondBrOp>(loc, leaderCond, leaderBlock, endBlock,
+    Value leaderCond = isLeader;
+    rewriter.create<LLVM::CondBrOp>(loc, leaderCond, leaderBlock, acc, endBlock,
                                     defaultRes);
     rewriter.setInsertionPointToEnd(leaderBlock);
     // Utilize global atomic only by leader threads
     rmwPtr = b.inttoptr(origPtrType, rmwPtr);
     Value atom = rewriter.create<LLVM::AtomicRMWOp>(
-        loc, opKind, rmwPtr, afterRedBlock->getArgument(0), memOrdering, scope);
+        loc, opKind, rmwPtr, leaderBlock->getArgument(0), memOrdering, scope);
     rewriter.create<LLVM::BrOp>(loc, atom, endBlock);
     rewriter.setInsertionPointToStart(endBlock);
 

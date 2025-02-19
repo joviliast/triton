@@ -1660,7 +1660,7 @@ def test_tensor_atomic_rmw(shape, axis, num_ctas, dtype_x_str, check_return_val,
 @pytest.mark.parametrize("size, num_ctas, dtype_x_str", [(size, num_ctas, dtype_x_str)
                                                          for size in [2, 4, 8, 32, 64, 128]
                                                          for num_ctas in num_ctas_list
-                                                         for dtype_x_str in ['float16']])
+                                                         for dtype_x_str in ['float16', 'float32']])
 def test_tensor_atomic_add_non_exclusive_offset(size, num_ctas, dtype_x_str, device):
 
     @triton.jit
@@ -1681,11 +1681,11 @@ def test_tensor_atomic_add_non_exclusive_offset(size, num_ctas, dtype_x_str, dev
 @pytest.mark.interpreter
 @pytest.mark.parametrize("shape, idx_order, mask_step, num_ctas, dtype_x_str",
                          [(shape, idx_order, mask_step, num_ctas, dtype_x_str)
-                          for shape in [(2, 2), (5, 5), (6, 6), (8, 8)]
+                          for shape in [(2, 2), (5, 5), (6, 5), (5, 6), (6, 6), (8, 8)]
                           for idx_order in ['increase', 'decrease', 'random_no_duplication', 'random']
                           for mask_step in range(1, 5)
                           for num_ctas in num_ctas_list
-                          for dtype_x_str in ['float16']])
+                          for dtype_x_str in ['float16', 'float32']])
 def test_tensor_atomic_add_access_patterns(shape, idx_order, mask_step, num_ctas, dtype_x_str, device):
     check_type_supported(dtype_x_str, device)
     if is_interpreter():
@@ -1709,7 +1709,7 @@ def test_tensor_atomic_add_access_patterns(shape, idx_order, mask_step, num_ctas
     if idx_order == 'decrease':
         idx = torch.stack([idx_row.flip(0).repeat_interleave(i + 1)[:shape1] for i in range(shape0)])
     if idx_order == 'random_no_duplication':
-        idx = torch.stack([torch.randperm(shape1, device=device) for _ in idx_row])
+        idx = torch.stack([torch.randperm(shape1, device=device) for _ in range(shape0)])
     if idx_order == 'random':
         idx = torch.randint(0, shape1, size=(shape0, shape1), device=device)
 
@@ -1726,7 +1726,10 @@ def test_tensor_atomic_add_access_patterns(shape, idx_order, mask_step, num_ctas
             cnt += 1
 
     kernel[(1, )](val, idx, dst, shape0, shape1, mask_step, 64, num_ctas=num_ctas)
-    np.testing.assert_allclose(to_numpy(dst_ref), to_numpy(dst), atol=1e-2)
+    if (dtype_x_str == 'float16'):
+        np.testing.assert_allclose(to_numpy(dst_ref), to_numpy(dst), atol=1e-2)
+    else:
+        np.testing.assert_allclose(to_numpy(dst_ref), to_numpy(dst), rtol=1e-4)
 
 
 @pytest.mark.interpreter
