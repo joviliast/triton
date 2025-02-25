@@ -1289,6 +1289,8 @@ struct AtomicRMWOpConversion
     // TODO: support data types less than 32 bits
     enableIntraWaveReduce &= valueElemNbits >= 32;
 
+    enableIntraWaveReduce = false;
+
     // In the case of unpaired f16 elements utilize dpp instructions to
     // accelerate atomics. Here is an algorithm of lowering
     // tt::atomicRmwOp(%ptr, %val, %mask):
