@@ -854,7 +854,8 @@ struct BufferAtomicRMWOpConversion
 
     // v4f16 and v4bf16 variants of buffer atomics do not exist.
     // only v2f16 and v2bf16.
-    if (valueElemTy.isBF16() || valueElemTy.isF16()) {
+    // v2bf16 has low accuracy in some cases. Disable them for now.
+    if (valueElemTy.isF16()) {
       // We clamp to the only supported vectorization width here (2).
       // In ConvertToBufferOps we check that we have a large enough vector size
       assert(vec >= 2);
@@ -863,6 +864,8 @@ struct BufferAtomicRMWOpConversion
       // Some types like F32 don't have a 2x vectorized version
     } else if (valueElemTy.isF32() || valueElemTy.isF64() ||
                valueElemTy.isInteger(32) || valueElemTy.isInteger(64)) {
+      vec = 1u;
+    } else if (valueElemTy.isBF16()) {
       vec = 1u;
     }
 
@@ -1379,7 +1382,9 @@ struct AtomicRMWOpConversion
 
     bool checkPairs = true;
     if (tensorTy) {
-      bool isF16Ty = valueElemTy.isF16() || valueElemTy.isBF16();
+      bool isF16Ty =
+          valueElemTy
+              .isF16(); // BF16 - is also available, but has low accuracy.
       unsigned availableVecSize = isF16Ty ? 2 : 1;
       vec = std::min<unsigned>(vec, availableVecSize);
       // Force F16 packing in the case it's not coming in as packed, but the
