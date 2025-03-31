@@ -811,7 +811,10 @@ struct AtomicRMWOpConversion
       auto valTy = cast<RankedTensorType>(val.getType());
       if (!supportsVectorized(atomicRmwAttr, valTy.getElementType())) {
         packed =
-            std::min<unsigned>(vecOrig, valTy.getElementType().isF16() ? 2 : 1);
+            std::min<unsigned>(vecOrig, valTy.getElementType().isF16() ||
+                                                valTy.getElementType().isBF16()
+                                            ? 2
+                                            : 1);
         vec = 1;
       }
       numElems = tensorTy.getNumElements();
