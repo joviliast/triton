@@ -481,6 +481,7 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
   if (!localLoad)
     return failure();
 
+  auto waitToken = localLoad.getToken();
   auto memDesc = localLoad.getSrc();
   auto type = cast<ttg::MemDescType>(memDesc.getType());
   SmallVector<int64_t> shape = llvm::to_vector(type.getShape());
@@ -503,7 +504,7 @@ LogicalResult Pingponger::genLocalSliceHelper(OpBuilder &builder, Value v,
     Value newSmem = builder.create<ttg::MemDescSubviewOp>(
         v.getLoc(), subviewDescType, memDesc, offsetsVal);
     Value prefetchSlice =
-        builder.create<ttg::LocalLoadOp>(v.getLoc(), tensorType, newSmem);
+        builder.create<ttg::LocalLoadOp>(v.getLoc(), tensorType, newSmem, waitToken);
     subviews.push_back(newSmem.getDefiningOp());
     slices.push_back(prefetchSlice.getDefiningOp());
   }
@@ -933,7 +934,7 @@ void Pingponger::getDotPingponged() {
   // tightly scheduling the latencies.
 
   //FIXME: get better condition to enable pingpong either for dot or for dot_scaled
-  if ((dotSOps.size() != 1) || (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotSOps.size() != 1)){
+  if ((dotSOps.size() != 1) && (gLoadOps.size() < 2 || lLoadOps.size() < 2 || dotSOps.size() != 1)){
     std::stringstream message;
     message << "Unable to match ping pong scheduling pattern. Details: "
             << gLoadOps.size() << " global loads, " << lLoadOps.size()
