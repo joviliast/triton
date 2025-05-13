@@ -277,7 +277,11 @@ LogicalResult StreamPipeliner::initSchedule(int maxIndirectionLevel) {
 
   // Schedule compute with ttg.local_load if paired
   // otherwise, schedule in the middle
-  int computeCluster = 2;
+  asyncWaitCluster = 0;
+  globalLoadCluster = 1;
+  localStoreCluster = 2;
+  localLoadCluster = 3;
+  int computeCluster = 3;
   if (stages[SCHED_LOCAL_LOAD] == stages[SCHED_COMPUTE]) {
     computeCluster = localLoadCluster;
   }
