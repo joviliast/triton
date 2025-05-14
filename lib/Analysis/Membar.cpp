@@ -172,7 +172,22 @@ void MembarAnalysis::update(Operation *op, BlockInfo *blockInfo,
     return;
   }
 
-  if (isa<triton::gpu::AsyncWaitOp, triton::nvidia_gpu::TMAStoreWaitOp>(op) &&
+  if (isa<triton::gpu::AsyncWaitOp>(op) &&
+      !isa<gpu::BarrierOp>(op->getNextNode())) {
+    int numLoads = op->getNumOperands();
+    while (op->getNextNode() && numLoads != 0) {
+      op = op->getNextNode();
+      if (isa<triton::gpu::AsyncCommitGroupOp>(op)) {
+        numLoads--;
+      }
+    }
+    builder->setInsertionPointAfter(op);
+    insertBarrier(op, builder);
+    blockInfo->sync();
+    return;
+  }
+
+  if (isa<triton::nvidia_gpu::TMAStoreWaitOp>(op) &&
       !isa<gpu::BarrierOp>(op->getNextNode())) {
     // If the current op is an async wait and the next op is not a barrier we
     // insert a barrier op and sync
