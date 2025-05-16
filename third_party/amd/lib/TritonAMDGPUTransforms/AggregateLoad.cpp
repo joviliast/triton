@@ -97,8 +97,8 @@ void findValidLoads(scf::ForOp forOp,
       int newUpperBound = ub;
       int64_t hoistFactor = 1;
       if (aggregateFactor != -1) {
-        newUpperBound = ub / aggregateFactor;
-        hoistFactor = aggregateFactor;
+        newUpperBound = aggregateFactor;
+        hoistFactor = ub / aggregateFactor;
       }
       auto getAlignedScaleLDSUsage = [&](int numBlocks) {
         return (aScaleShape[0] + bScaleShape[0]) *
@@ -123,6 +123,10 @@ void findValidLoads(scf::ForOp forOp,
           break;
         }
         newUpperBound /= 2;
+      }
+      if (ub % newUpperBound != 0) {
+        // Not supported configuration yet
+        continue;
       }
 
       assert(foundHoistKDim && "Cannot determine hoisted-K size.");

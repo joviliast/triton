@@ -1,4 +1,5 @@
 // RUN: triton-opt %s -split-input-file --tritonamdgpu-aggregate-load=factor=-1 | FileCheck %s
+// RUN: triton-opt %s -split-input-file --tritonamdgpu-aggregate-load=factor=2 | FileCheck %s --check-prefix=FACTOR2
 
 // CHECK-LABEL: kernel_no_k_stride
 // CHECK: local_load
@@ -474,8 +475,14 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 
 // -----
 
-// CHECK-LABEL: kernel_with_outer_loop
-// CHECK: local_load
+// FACTOR2-LABEL: kernel_with_outer_loop
+// FACTOR2: [[LOW_BOUND_2:%.*]] = arith.constant 0 : i32
+// FACTOR2: [[LOW_BOUND_1:%.*]] = arith.constant 0 : i32
+// FACTOR2-DAG: [[UPPER_BOUND_1:%.*]] = arith.constant 128 : i32
+// FACTOR2-DAG: [[UPPER_BOUND_2:%.*]] = arith.constant 2 : i32
+// FACTOR2: scf.for {{.*}} [[LOW_BOUND_1]] to [[UPPER_BOUND_1]]
+// FACTOR2: scf.for {{.*}} [[LOW_BOUND_2]] to [[UPPER_BOUND_2]]
+// FACTOR2: local_load
 
 #blocked = #ttg.blocked<{sizePerThread = [1, 16], threadsPerWarp = [8, 8], warpsPerCTA = [4, 1], order = [1, 0]}>
 #blocked1 = #ttg.blocked<{sizePerThread = [16, 1], threadsPerWarp = [8, 8], warpsPerCTA = [1, 4], order = [0, 1]}>
