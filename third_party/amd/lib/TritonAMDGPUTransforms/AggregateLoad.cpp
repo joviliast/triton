@@ -129,7 +129,9 @@ void findValidLoads(scf::ForOp forOp,
         continue;
       }
 
-      assert(foundHoistKDim && "Cannot determine hoisted-K size.");
+      if (!foundHoistKDim) {
+        continue;
+      }
 
       hoistLoopSpecs.push_back({newUpperBound, hoistFactor});
       currentSharedMemoryUsage -= newMemoryUsed;
