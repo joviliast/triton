@@ -9,6 +9,7 @@
 #include "triton/Analysis/Utility.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
+#include "triton/Tools/Sys/GetEnv.hpp"
 #include "llvm/ADT/MapVector.h"
 
 using llvm::MapVector;
@@ -685,6 +686,12 @@ struct AggregateLoad : public TritonAMDGPUAggregateLoadBase<AggregateLoad> {
   AggregateLoad(StringRef archGen, int factor) {
     this->archGenerationName = archGen.data();
     this->aggregateFactor = factor;
+
+    std::string envAggregateFactor =
+        mlir::triton::tools::getStrEnv("TRITON_HIP_AGGREGATE_LOAD_FACTOR");
+    if (envAggregateFactor != "") {
+      this->aggregateFactor = std::stoi(envAggregateFactor);
+    }
   }
 
   void runOnOperation() override {
