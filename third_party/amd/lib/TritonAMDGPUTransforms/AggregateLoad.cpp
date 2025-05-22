@@ -552,34 +552,44 @@ void processLoopBody(scf::ForOp forOp, Operation *op, Value localAllocVal) {
 
 // TODO: replace with general axis analysis.
 // for now this function is a plain hack
-int64_t getKStride(Value ptr) {
+Value getKStride(OpBuilder &builder, Value ptr) {
   // %56 = arith.muli %54, %cst_1 : tensor<1x8xi32, #blocked2> loc(#loc43)
   // %57 = tt.broadcast %51 : tensor<32x1x!tt.ptr<i8>, #blocked2> ->
   // tensor<32x8x!tt.ptr<i8>, #blocked2> loc(#loc44) %58 = tt.broadcast %56 :
   // tensor<1x8xi32, #blocked2> -> tensor<32x8xi32, #blocked2> loc(#loc44) %59 =
   // tt.addptr %57, %58 :
+  auto loc = ptr.getLoc();
+
   auto addptr = dyn_cast<triton::AddPtrOp>(ptr.getDefiningOp());
   if (!addptr)
-    return 1;
+    return Value();
+
   triton::BroadcastOp bcast;
   for (auto bcastVal : addptr.getOperands()) {
     bcast = dyn_cast<triton::BroadcastOp>(bcastVal.getDefiningOp());
     if (!bcast)
-      return 1;
+      return Value();
     auto opShape = bcast.getSrc().getType().getShape();
     if (opShape[0] == 1)
       break;
   }
+
   auto mulOp = dyn_cast<arith::MulIOp>(bcast.getSrc().getDefiningOp());
   if (!mulOp)
-    return 1;
-  auto cst = dyn_cast<arith::ConstantOp>(mulOp.getRhs().getDefiningOp());
-  if (!cst)
-    return 1;
-  auto strideConstantAttr =
-      dyn_cast<mlir::DenseElementsAttr>(cst.getValueAttr());
-  auto strideAttr = strideConstantAttr.getSplatValue<IntegerAttr>();
-  return strideAttr.getInt();
+    return Value();
+
+  if (auto cst = dyn_cast<arith::ConstantOp>(mulOp.getRhs().getDefiningOp())) {
+    auto strideConstantAttr =
+        dyn_cast<mlir::DenseElementsAttr>(cst.getValueAttr());
+    auto strideAttr = strideConstantAttr.getSplatValue<IntegerAttr>();
+    int64_t constStride = strideAttr.getInt();
+    return builder.create<arith::ConstantOp>(
+        loc, builder.getI32IntegerAttr(constStride));
+  } else if (auto splat =
+                 dyn_cast<triton::SplatOp>(mulOp.getRhs().getDefiningOp())) {
+    return splat.getSrc();
+  }
+  assert(false && "expect constantOp or splatOp as a stride multiplier");
 }
 
 void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
@@ -641,16 +651,21 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
   auto outerDimLoop = builder.create<scf::ForOp>(
       loc, lb, ub, step, ValueRange{init, aPtr, bPtr},
       [&](OpBuilder &b, Location loc, Value iv, ValueRange args) {
-        int64_t aKStride = getKStride(aScaleLoadOp.getPtr());
-        int64_t bKStride = getKStride(bScaleLoadOp.getPtr());
-        Value offsetElA = builder.create<arith::MulIOp>(
-            loc, iv,
-            builder.create<arith::ConstantOp>(
-                loc, builder.getI32IntegerAttr(hoistKSize * aKStride)));
-        Value offsetElB = builder.create<arith::MulIOp>(
-            loc, iv,
-            builder.create<arith::ConstantOp>(
-                loc, builder.getI32IntegerAttr(hoistKSize * bKStride)));
+        Value aKStride = getKStride(builder, aScaleLoadOp.getPtr());
+        Value bKStride = getKStride(builder, bScaleLoadOp.getPtr());
+
+        Value offsetElA = builder.create<arith::ConstantOp>(
+            loc, builder.getI32IntegerAttr(hoistKSize));
+        if (aKStride)
+          offsetElA = builder.create<arith::MulIOp>(loc, offsetElA, aKStride);
+        offsetElA = builder.create<arith::MulIOp>(loc, iv, offsetElA);
+
+        Value offsetElB = builder.create<arith::ConstantOp>(
+            loc, builder.getI32IntegerAttr(hoistKSize));
+        if (bKStride)
+          offsetElB = builder.create<arith::MulIOp>(loc, offsetElB, bKStride);
+        offsetElB = builder.create<arith::MulIOp>(loc, iv, offsetElB);
+
         auto [aScalePtr, newAScaleLoadedVal, newAScaleLocalAllocVal] =
             createGlobalLoadLocalAlloc(loc, aScaleLoadOp, offsetElA,
                                        aScaleLocalAllocVal);
