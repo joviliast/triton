@@ -195,16 +195,12 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
   assert(broadcastOp && "We are not starting with a broadcast op");
   auto bcastKParentOp = broadcastOp.getSrc().getDefiningOp();
   auto strideMulOp = dyn_cast<arith::MulIOp>(bcastKParentOp);
-  DenseElementsAttr strideConstantAttr;
+  Value strideVal;
   if (strideMulOp) {
-    auto strideConstant =
-        dyn_cast<arith::ConstantOp>(strideMulOp.getRhs().getDefiningOp());
-    assert(strideConstant && "anticipated K stride is not constant");
-    strideConstantAttr =
-        dyn_cast<mlir::DenseElementsAttr>(strideConstant.getValueAttr());
-    assert(strideConstantAttr && "K stride constant is not Dense");
-    assert(strideConstantAttr.isSplat() &&
-           "The attribute of the constantOp is not a splat");
+    strideVal = strideMulOp.getRhs();
+    assert(
+        (isa<arith::ConstantOp, triton::SplatOp>(strideVal.getDefiningOp())) &&
+        "anticipated K stride is not constant or single scalar");
     bcastKParentOp = strideMulOp.getLhs().getDefiningOp();
   }
   auto expandDimsOp = dyn_cast<triton::ExpandDimsOp>(bcastKParentOp);
@@ -221,20 +217,37 @@ Value expandPathBcastM(Operation *bcastM, OpBuilder &builder,
       expandDimsOp.getLoc(), newMakeRangeValue, expandDim);
 
   if (strideMulOp) {
-    RankedTensorType ty = cast<RankedTensorType>(strideConstantAttr.getType());
-    SmallVector<int64_t> newStrideShape(ty.getShape());
+    auto loc = strideMulOp.getLoc();
+    RankedTensorType oldStrideTy = cast<RankedTensorType>(strideVal.getType());
+    SmallVector<int64_t> newStrideShape(oldStrideTy.getShape());
     assert(newStrideShape.size() == 2);
     newStrideShape[1] = hoistDimSize;
-    auto newStrideTy = RankedTensorType::get(
-        newStrideShape, ty.getElementType(), ty.getEncoding());
-    auto reshapedStrideAttr = strideConstantAttr.resizeSplat(newStrideTy);
+    auto newStrideTy =
+        RankedTensorType::get(newStrideShape, oldStrideTy.getElementType(),
+                              oldStrideTy.getEncoding());
+    Value newStrideValue;
+    if (auto strideConstant =
+            dyn_cast<arith::ConstantOp>(strideVal.getDefiningOp())) {
+      DenseElementsAttr strideConstantAttr =
+          dyn_cast<mlir::DenseElementsAttr>(strideConstant.getValueAttr());
+      assert(strideConstantAttr && "K stride constant is not Dense");
+      assert(strideConstantAttr.isSplat() &&
+             "The attribute of the constantOp is not a splat");
 
-    auto loc = strideMulOp.getLoc();
-    auto newStrideConst =
-        builder.create<arith::ConstantOp>(loc, newStrideTy, reshapedStrideAttr);
+      auto reshapedStrideAttr = strideConstantAttr.resizeSplat(newStrideTy);
+
+      newStrideValue = builder.create<arith::ConstantOp>(loc, newStrideTy,
+                                                         reshapedStrideAttr);
+    } else {
+      auto strideSplat = dyn_cast<triton::SplatOp>(strideVal.getDefiningOp());
+      assert(strideSplat && "expect strideVal defining op to be splat");
+      Value strideScalar = strideSplat.getSrc();
+      newStrideValue =
+          builder.create<triton::SplatOp>(loc, newStrideTy, strideScalar);
+    }
 
     newExpandDimsValue =
-        builder.create<arith::MulIOp>(loc, newExpandDimsValue, newStrideConst);
+        builder.create<arith::MulIOp>(loc, newExpandDimsValue, newStrideValue);
   }
 
   // erase ops
