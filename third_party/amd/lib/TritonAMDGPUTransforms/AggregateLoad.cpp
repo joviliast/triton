@@ -621,8 +621,8 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
   Value step =
       builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(1));
   Value init = forOp.getInits()[0];
-  Value aPtr = forOp.getInits()[1];
-  Value bPtr = forOp.getInits()[2];
+  Value aPtr = forOp.getInits()[3];
+  Value bPtr = forOp.getInits()[4];
   int innerUB = isUpperBoundConstant(forOp);
   Value newInnerUB = builder.create<arith::ConstantOp>(
       loc, builder.getI32IntegerAttr(newUpperBound));
@@ -685,8 +685,8 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
         newInnerForOp.setUpperBound(newInnerUB);
         builder.create<scf::YieldOp>(loc,
                                      ValueRange{newInnerLoop->getResults()[0],
-                                                newInnerLoop->getResults()[1],
-                                                newInnerLoop->getResults()[2]});
+                                                newInnerLoop->getResults()[3],
+                                                newInnerLoop->getResults()[4]});
       });
   forOp.getResults()[0].replaceAllUsesWith(outerDimLoop.getResults()[0]);
   forOp.erase();
