@@ -226,8 +226,12 @@ class HIPBackend(BaseBackend):
         passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_optimize_epilogue(pm)
 
-        if options.aggregate_load_factor == -1 or options.aggregate_load_factor > 1:
-            amd.passes.ttgpuir.add_aggregate_load(pm, options.arch, options.aggregate_load_factor)
+        import os
+        la_factor = options.aggregate_load_factor
+        if "TRITON_HIP_AGGREGATE_LOAD_FACTOR" in os.environ:
+            la_factor = int(os.environ["TRITON_HIP_AGGREGATE_LOAD_FACTOR"])
+        if la_factor == -1 or la_factor > 1:
+            amd.passes.ttgpuir.add_aggregate_load(pm, options.arch, la_factor)
             passes.ttgpuir.add_coalesce(pm)
 
         passes.ttgpuir.add_optimize_dot_operands(pm, True)
