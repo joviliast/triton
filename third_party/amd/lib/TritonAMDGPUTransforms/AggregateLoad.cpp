@@ -620,9 +620,7 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
       loc, builder.getI32IntegerAttr(hoistFactor));
   Value step =
       builder.create<arith::ConstantOp>(loc, builder.getI32IntegerAttr(1));
-  Value init = forOp.getInits()[0];
-  Value aPtr = forOp.getInits()[3];
-  Value bPtr = forOp.getInits()[4];
+  ValueRange oldInits = forOp.getInits();
   int innerUB = isUpperBoundConstant(forOp);
   Value newInnerUB = builder.create<arith::ConstantOp>(
       loc, builder.getI32IntegerAttr(newUpperBound));
@@ -649,7 +647,7 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
   };
 
   auto outerDimLoop = builder.create<scf::ForOp>(
-      loc, lb, ub, step, ValueRange{init, aPtr, bPtr},
+      loc, lb, ub, step, oldInits,
       [&](OpBuilder &b, Location loc, Value iv, ValueRange args) {
         Value aKStride = getKStride(builder, aScaleLoadOp.getPtr());
         Value bKStride = getKStride(builder, bScaleLoadOp.getPtr());
@@ -677,16 +675,13 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
         mapping.map(bScaleLoadOp.getResult(), newBScaleLoadedVal);
         mapping.map(aScaleLocalAllocVal, newAScaleLocalAllocVal);
         mapping.map(bScaleLocalAllocVal, newBScaleLocalAllocVal);
-        mapping.map(init, args[0]);
-        mapping.map(aPtr, args[1]);
-        mapping.map(bPtr, args[2]);
+        for (auto [index, initVal] : llvm::enumerate(oldInits)) {
+          mapping.map(initVal, args[index]);
+        }
         Operation *newInnerLoop = builder.clone(*forOp.getOperation(), mapping);
         auto newInnerForOp = llvm::cast<scf::ForOp>(newInnerLoop);
         newInnerForOp.setUpperBound(newInnerUB);
-        builder.create<scf::YieldOp>(loc,
-                                     ValueRange{newInnerLoop->getResults()[0],
-                                                newInnerLoop->getResults()[3],
-                                                newInnerLoop->getResults()[4]});
+        builder.create<scf::YieldOp>(loc, newInnerLoop->getResults());
       });
   forOp.getResults()[0].replaceAllUsesWith(outerDimLoop.getResults()[0]);
   forOp.erase();
