@@ -1,5 +1,6 @@
 #include "TritonAMDGPUToLLVM/TargetUtils.h"
 #include "TritonAMDGPUTransforms/Passes.h"
+#include "mlir/Dialect/SCF/Utils/Utils.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/TypeUtilities.h"
@@ -682,6 +683,7 @@ void generateOuterLoop(scf::ForOp forOp, Value aScaleLocalAllocVal,
         auto newInnerForOp = llvm::cast<scf::ForOp>(newInnerLoop);
         newInnerForOp.setUpperBound(newInnerUB);
         builder.create<scf::YieldOp>(loc, newInnerLoop->getResults());
+        auto unrolled = loopUnrollFull(newInnerForOp);
       });
   forOp.getResults()[0].replaceAllUsesWith(outerDimLoop.getResults()[0]);
   forOp.erase();

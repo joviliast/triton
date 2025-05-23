@@ -24,5 +24,9 @@ add_triton_library(TritonAMDGPUTransforms
   TritonAMDAnalysis
 )
 
+mlir_target_link_libraries(TritonAMDGPUTransforms PUBLIC
+  MLIRSCFUtils
+)
+
 target_include_directories(TritonAMDGPUTransforms PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include)
 target_include_directories(TritonAMDGPUTransforms PUBLIC ${CMAKE_CURRENT_BINARY_DIR}/../../include)
