@@ -926,6 +926,20 @@ void StreamPipeliner::createStreamOps() {
       createStreamCopy(loadOp, alloc, extractIdx);
     }
   }
+
+  if (useAsyncCopy) {
+    for (Operation &op : forOp.getBody()->without_terminator()) {
+      if (auto lload = dyn_cast<ttg::LocalLoadOp>(&op);
+          lload && !lload.getToken()) {
+        ttg::AsyncWaitOp waitOp =
+            builder.create<ttg::AsyncWaitOp>(loc, ValueRange(), 0);
+        auto newLoad = builder.create<ttg::LocalLoadOp>(loc, lload.getType(),
+                                                        lload.getSrc(), waitOp);
+        lload->replaceAllUsesWith(ValueRange{newLoad});
+        lload.erase();
+      }
+    }
+  }
   // Patch the yield with the updated counters.
   appendToForOpYield(forOp, {extractIdx});
 }
