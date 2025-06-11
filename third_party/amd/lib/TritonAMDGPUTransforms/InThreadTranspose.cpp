@@ -95,8 +95,11 @@ void transposeInRegsitersBeforeStoreInLocalMemory(
 
   auto loc = memStoreOp->getLoc();
   auto newLoadType = replaceEncoding(data.getType(), newLoadEncoding);
-  auto nonTransposed =
-      rewriter.create<ttg::ConvertLayoutOp>(loc, newLoadType, data);
+  auto nonTransposed = rewriter.create<ttg::ConvertLayoutOp>(
+      loc, mlir::TypeRange{newLoadType}, mlir::ValueRange{data},
+      llvm::ArrayRef<::mlir::NamedAttribute>(
+          {rewriter.getStringAttr("key_attr"),
+           rewriter.getStringAttr("AAAAAAAAA")}));
 
   auto transposedType = replaceEncoding(data.getType(), transposedEncoding);
   auto inThreadTransposed = rewriter.create<ttag::InThreadTransposeOp>(
