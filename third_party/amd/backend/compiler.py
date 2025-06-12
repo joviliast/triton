@@ -254,6 +254,8 @@ class HIPBackend(BaseBackend):
         if is_in_thread_transpose_enabled(options.arch):
             amd.passes.ttgpuir.add_in_thread_transpose(pm)
             passes.ttgpuir.add_remove_layout_conversions(pm)
+            amd.passes.ttgpuir.add_extend_load_for_in_thread_transpose(pm)
+            passes.ttgpuir.add_remove_layout_conversions(pm)
         amd.passes.ttgpuir.add_reorder_instructions(pm)
         use_block_pingpong = is_pingpong_schedule_enabled(options.arch)
         if use_block_pingpong and options.num_stages == 2:
