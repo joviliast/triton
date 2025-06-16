@@ -598,12 +598,13 @@ matchInThreadTransposePattern(ttg::LocalLoadOp lLoad) {
     Value onRegs = localMemStore->getOperand(0);
     auto onRegsEnc = cast<RankedTensorType>(onRegs.getType()).getEncoding();
     auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(onRegsEnc);
-    if (!blockedEnc)
+    if (!blockedEnc) {
+      LDBG("not Blocked Enc");
       return failure();
+    }
     auto order = blockedEnc.getOrder();
     SetVector<Value> visitedVals;
     auto predValsSearch = traverseCFForValueDefs(onRegs, visitedVals);
-
     if (failed(predValsSearch)) {
       LDBG("Failed to traverse path to defining operations");
       pattern.valsOnRegs.insert(onRegs);
@@ -613,6 +614,7 @@ matchInThreadTransposePattern(ttg::LocalLoadOp lLoad) {
                          return llvm::isa<tt::LoadOp>(predVal.getDefiningOp());
                        }) &&
           order[0] == kDimNum) {
+        LDBG("Wrong Order");
         return failure();
       }
       pattern.valsOnRegs.insert_range(predValsSearch.value());
@@ -640,8 +642,10 @@ matchInThreadTransposePattern(ttg::LocalLoadOp lLoad) {
   // TODO support non 2d tensors:
   // in_thread_transpose operation and getTransposableBlockedEnc function
   // are limited to 2d tensors
-  if (expectedLoadType.getRank() != 2)
+  if (expectedLoadType.getRank() != 2) {
+    LDBG("Wrong load rank");
     return failure();
+  }
 
   auto kDimMaxSizePerThread = getMaxSizePerThread(expectedLoadType, kDimNum);
   // kDimRepeats == 0 means loadType has unexpected layout
