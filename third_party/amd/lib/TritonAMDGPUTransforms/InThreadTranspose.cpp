@@ -8,6 +8,8 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "llvm/Support/Debug.h"
 
+#include <queue>
+
 // InThreadTranspose pass optimizes inefficient
 // tt.load->ttg.local_store->ttg.local_load chains.
 //
@@ -78,7 +80,7 @@ void refineGlobalLoadLayout(PatternRewriter &rewriter, Attribute encoding,
   rewriter.replaceOpWithNewOp<ttg::ConvertLayoutOp>(load, loadType, newResult);
 }
 
-void transposeInRegsitersBeforeStoreInLocalMemory(
+void transposeInRegistersBeforeStoreInLocalMemory(
     PatternRewriter &rewriter, Operation *memStoreOp,
     ArrayRef<int64_t> loadShape, ttg::BlockedEncodingAttr newLoadEncoding) {
   assert((mlir::isa<ttg::LocalAllocOp, ttg::LocalStoreOp>(memStoreOp)));
@@ -87,20 +89,28 @@ void transposeInRegsitersBeforeStoreInLocalMemory(
     return;
   auto data = memStoreOp->getOperand(0);
   rewriter.setInsertionPoint(memStoreOp);
-
+  SmallVector<int64_t> aa;
+  aa.push_back(64);
+  aa.push_back(128);
   auto transposedLayout =
-      ttag::InThreadTransposeOp::deduceOutputLayout(loadShape, newLoadEncoding);
+      ttag::InThreadTransposeOp::deduceOutputLayout(aa, newLoadEncoding);
+
+  LDBG("transposedLayout " << transposedLayout);
   auto transposedEncoding =
       ttg::LinearEncodingAttr::get(memStoreOp->getContext(), transposedLayout);
+  LDBG("transposedEncoding " << transposedEncoding);
 
   auto loc = memStoreOp->getLoc();
   auto newLoadType = replaceEncoding(data.getType(), newLoadEncoding);
+
   auto nonTransposed =
       rewriter.create<ttg::ConvertLayoutOp>(loc, newLoadType, data);
+  LDBG("convert " << nonTransposed);
 
   auto transposedType = replaceEncoding(data.getType(), transposedEncoding);
   auto inThreadTransposed = rewriter.create<ttag::InThreadTransposeOp>(
       loc, transposedType, nonTransposed);
+  LDBG("inThreadTransposed " << inThreadTransposed);
   rewriter.startOpModification(memStoreOp);
   memStoreOp->setOperand(0, inThreadTransposed);
   rewriter.finalizeOpModification(memStoreOp);
@@ -151,7 +161,10 @@ void changeSharedEncoding(PatternRewriter &rewriter, Value memVal,
 /// Structure describes operations involved in
 /// value -> ttg.local_alloc -> ttg.local_store op chain
 struct RegisterToSharedMemoryOpChain {
+  // Values on registers before local alloc
   SetVector<Value> valsOnRegs;
+  // list of globalLoads operations
+  SetVector<tt::LoadOp> globalLoads;
   // list of localAllocOp and localStoreOp operations
   SetVector<Operation *> localAllocStores;
   // list of MemDescSubviewOp, control flow results and block operands
@@ -186,6 +199,44 @@ traverseForOpForDefs(scf::ForOp forOp, int argIdx,
       return failure();
     return search.value();
   }
+}
+
+/// Finds all defining operations of a given type `Op` that transitively define
+/// the input `val`. If an intermediate value is defined by an operation of a
+/// different type, the function traverses further until it either finds a
+/// matching operation or reaches a value with no defining op.
+///
+/// \param val The value whose defining operations are to be found.
+/// \returns Failure or vector of operations of type `Op` that define `val`,
+///          possibly through multiple levels of indirection.
+template <typename Op>
+FailureOr<SmallVector<Op>> findAllTransitiveDefiningOps(Value val) {
+  SetVector<Value> visitedVals;
+  std::queue<Value> queue;
+  SmallVector<Op> result;
+  queue.push(val);
+  while (!queue.empty()) {
+    auto currentVal = queue.front();
+    auto candidates = traverseCFForValueDefs(currentVal, visitedVals);
+    queue.pop();
+    if (failed(candidates))
+      continue;
+
+    SmallVector<Op> newVals;
+    for (auto candidateValue : candidates.value()) {
+      auto op = candidateValue.getDefiningOp();
+      if (!op) {
+        continue;
+      }
+      if (auto typedOp = dyn_cast<Op>(op)) {
+        result.push_back(typedOp);
+      } else {
+        for (auto val : op->getOperands())
+          queue.push(val);
+      }
+    }
+  }
+  return result;
 }
 
 FailureOr<SmallVector<Value>>
@@ -595,73 +646,89 @@ matchInThreadTransposePattern(ttg::LocalLoadOp lLoad) {
     // check if it is a local alloc with no predecessor
     if (localMemStore->getNumOperands() == 0)
       continue;
+
     Value onRegs = localMemStore->getOperand(0);
-    auto onRegsEnc = cast<RankedTensorType>(onRegs.getType()).getEncoding();
-    auto blockedEnc = dyn_cast<ttg::BlockedEncodingAttr>(onRegsEnc);
-    if (!blockedEnc) {
-      LDBG("not Blocked Enc");
-      return failure();
-    }
-    auto order = blockedEnc.getOrder();
     SetVector<Value> visitedVals;
     auto predValsSearch = traverseCFForValueDefs(onRegs, visitedVals);
     if (failed(predValsSearch)) {
       LDBG("Failed to traverse path to defining operations");
       pattern.valsOnRegs.insert(onRegs);
     } else {
-      if (llvm::any_of(predValsSearch.value(),
-                       [&](auto &predVal) {
-                         return llvm::isa<tt::LoadOp>(predVal.getDefiningOp());
-                       }) &&
-          order[0] == kDimNum) {
-        LDBG("Wrong Order");
-        return failure();
-      }
       pattern.valsOnRegs.insert_range(predValsSearch.value());
+    }
+
+    auto transitiveLoadsSearch =
+        findAllTransitiveDefiningOps<tt::LoadOp>(onRegs);
+    if (failed(transitiveLoadsSearch)) {
+      LDBG("Failed to find leading load");
+      continue;
+    }
+
+    if (failed(transitiveLoadsSearch)) {
+      LDBG("Failed to traverse path to defining loads");
+
+      continue;
+    } else {
+      for (auto &load : transitiveLoadsSearch.value()) {
+        LDBG("processing global load: " << *load);
+        auto loadedTensorType =
+            dyn_cast<RankedTensorType>(load.getResult().getType());
+        if (!loadedTensorType) {
+          LDBG("Not a tensor type");
+          continue;
+        }
+        auto loadedTensorEncoding = loadedTensorType.getEncoding();
+        auto loadedTensorBlockedEnc =
+            dyn_cast<ttg::BlockedEncodingAttr>(loadedTensorEncoding);
+        if (!loadedTensorBlockedEnc) {
+          LDBG("Only blocked layout supported");
+          continue;
+        }
+        if (loadedTensorBlockedEnc.getOrder()[0] == kDimNum) {
+          LDBG("Loaded encoding is already optimal");
+          continue;
+        }
+        // TODO support non 2d tensors:
+        // in_thread_transpose operation and getTransposableBlockedEnc function
+        // are limited to 2d tensors
+        if (loadedTensorType.getRank() != 2) {
+          LDBG("Only rank equal to 2 is supported");
+          continue;
+        }
+        auto kDimMaxSizePerThread =
+            getMaxSizePerThread(loadedTensorType, kDimNum);
+        // kDimRepeats == 0 means loadType has unexpected layout
+        // kDimRepeats == 1 means there are no room in k dimension in layout to
+        // transpose in registers
+        if (kDimMaxSizePerThread < 2) {
+          LDBG("Can not extend load layout");
+          continue; // or fail??
+        }
+        pattern.globalLoads.insert(load);
+      }
     }
   }
 
+  if (pattern.valsOnRegs.empty()) {
+    LDBG("Did not find predecessor operations");
+    return failure();
+  }
+  if (pattern.globalLoads.empty()) {
+    LDBG("No propper loaded encodings found");
+    return failure();
+  }
   LDBG("found predecessors to value on regs: " << pattern.valsOnRegs.size());
-  for (auto load : pattern.valsOnRegs)
+  for (auto load : pattern.globalLoads)
     LDBG(load);
+  LDBG("found predecessors to value on regs: " << pattern.valsOnRegs.size());
+  for (auto onRegs : pattern.valsOnRegs)
+    LDBG(onRegs);
   LDBG("found local alloc stores: " << pattern.localAllocStores.size());
   for (auto local : pattern.localAllocStores)
     LDBG(*local);
   LDBG("found shared mem values: " << pattern.sharedMemVals.size());
   for (auto val : pattern.sharedMemVals)
     LDBG(val);
-
-  if (pattern.valsOnRegs.empty()) {
-    LDBG("Did not find predecessor operations");
-    return failure();
-  }
-  // check that all defining operations have same type(i.e. shape and layout),
-  // otherwise can not guarantee transformation overhead is cheap
-  auto firstVal = pattern.valsOnRegs.front();
-  auto expectedLoadType = cast<RankedTensorType>(firstVal.getType());
-  // TODO support non 2d tensors:
-  // in_thread_transpose operation and getTransposableBlockedEnc function
-  // are limited to 2d tensors
-  if (expectedLoadType.getRank() != 2) {
-    LDBG("Wrong load rank");
-    return failure();
-  }
-
-  auto kDimMaxSizePerThread = getMaxSizePerThread(expectedLoadType, kDimNum);
-  // kDimRepeats == 0 means loadType has unexpected layout
-  // kDimRepeats == 1 means there are no room in k dimension in layout to
-  // transpose in registers
-  if (kDimMaxSizePerThread < 2) {
-    LDBG("Can not extend load layout");
-    return failure();
-  }
-
-  for (auto val : pattern.valsOnRegs) {
-    if (val.getType() != expectedLoadType) {
-      LDBG("Mismatch between predecessors result types");
-      return failure();
-    }
-  }
 
   // TODO implement general heuristic,
   // analyzing local load/store vectorization and estimating bank conflicts?
@@ -740,26 +807,32 @@ public:
     auto dotOpEnc =
         cast<ttg::DotOperandEncodingAttr>(localLoad.getType().getEncoding());
 
-    auto firstVal = pattern.valsOnRegs.front();
-    RankedTensorType onRegsType = cast<RankedTensorType>(firstVal.getType());
-    auto newBlockedEnc =
-        getTransposableBlockedEnc(dotOpEnc.getOpIdx(), onRegsType);
-    LDBG("operand newBlockedEnc = " << newBlockedEnc);
-    auto loadShape = onRegsType.getShape();
-
     LDBG("Adjusting global loads");
-    for (auto onReg : pattern.valsOnRegs) {
-      auto gLoadCandidate = onReg.getDefiningOp();
-      if (!gLoadCandidate)
-        continue;
-      if (auto gLoad = dyn_cast<tt::LoadOp>(gLoadCandidate))
-        refineGlobalLoadLayout(rewriter, newBlockedEnc, gLoad);
-    }
+    auto firstLoad = pattern.globalLoads.front();
+    LDBG("Consider " << *firstLoad);
+    auto firstLoadRes = firstLoad.getResult();
+    RankedTensorType firstLoadedType =
+        cast<RankedTensorType>(firstLoadRes.getType());
+    auto newFinalBlockedEnc =
+        getTransposableBlockedEnc(dotOpEnc.getOpIdx(), firstLoadedType);
+    refineGlobalLoadLayout(rewriter, newFinalBlockedEnc, firstLoad);
+    LDBG("operand newBlockedEnc = " << newFinalBlockedEnc);
+
+    /*for (auto gLoad : llvm::drop_begin(pattern.globalLoads)) {
+      LDBG("Consider " << *gLoad);
+      auto loadRes = gLoad.getResult();
+      RankedTensorType loadedType = cast<RankedTensorType>(loadRes.getType());
+      auto newBlockedEnc =
+          getTransposableBlockedEnc(dotOpEnc.getOpIdx(), loadedType);
+      LDBG("operand newBlockedEnc = " << newBlockedEnc);
+      refineGlobalLoadLayout(rewriter, newBlockedEnc, gLoad);
+    }*/
 
     LDBG("Inserting transpose in registers before store in LDS");
-    for (auto memOp : pattern.localAllocStores)
-      transposeInRegsitersBeforeStoreInLocalMemory(rewriter, memOp, loadShape,
-                                                   newBlockedEnc);
+    for (auto memOp : pattern.localAllocStores) {
+      transposeInRegistersBeforeStoreInLocalMemory(
+          rewriter, memOp, firstLoadedType.getShape(), newFinalBlockedEnc);
+    }
 
     LDBG("Adjust shared encoding");
     auto newSharedEncoding =

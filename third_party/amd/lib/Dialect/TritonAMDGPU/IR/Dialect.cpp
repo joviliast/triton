@@ -32,6 +32,8 @@
 // clang-format off
 #include "Dialect/TritonAMDGPU/IR/Dialect.h"
 #include "Dialect/TritonAMDGPU/IR/Dialect.cpp.inc"
+
+#include <iostream>
 // clang-format on
 
 using namespace mlir;
@@ -267,8 +269,12 @@ LogicalResult InThreadTransposeOp::verify() {
   auto expectedLinearLayout = deduceOutputLayout(shape, srcEncoding);
   auto dstLinearLayout = triton::gpu::toLinearLayout(shape, dstEncoding);
   if (dstLinearLayout != expectedLinearLayout) {
+    srcTy.dump();
+    dstTy.dump();
+    std::cout << shape[0] << shape[1] << std::endl;
     return emitOpError("Expect output layout to be transposed per thread: " +
-                       expectedLinearLayout.toString());
+                       expectedLinearLayout.toString() + "\nvs\n" +
+                       dstLinearLayout.toString());
   }
   return success();
 }
