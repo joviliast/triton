@@ -201,6 +201,56 @@ traverseForOpForDefs(scf::ForOp forOp, int argIdx,
   }
 }
 
+template <typename Op>
+LogicalResult moveAllTransitiveDefiningOpsToEarliestUser(Value val) {
+  SetVector<Operation *> transitiveDefs;
+  std::queue<Value> queue;
+  SetVector<Value> visitedVals;
+  queue.push(val);
+
+  // Step 1: Collect all transitive defining ops
+  while (!queue.empty()) {
+    Value currentVal = queue.front();
+    queue.pop();
+
+    if (!visitedVals.insert(currentVal))
+      continue;
+
+    auto defOp = currentVal.getDefiningOp();
+    if (!defOp)
+      continue;
+
+    if (!transitiveDefs.insert(defOp))
+      continue;
+
+    for (Value operand : defOp->getOperands())
+      queue.push(operand);
+  }
+
+  if (transitiveDefs.empty())
+    return success();
+
+  for (Operation *defOp : transitiveDefs) {
+    Operation *earliestUser = nullptr;
+
+    for (Value result : defOp->getResults()) {
+      for (Operation *user : result.getUsers()) {
+        if (user->getBlock() != defOp->getBlock())
+          continue; // Cross-block move not supported
+
+        if (!earliestUser || user->isBeforeInBlock(earliestUser))
+          earliestUser = user;
+      }
+    }
+
+    if (earliestUser && defOp->getBlock() == earliestUser->getBlock()) {
+      defOp->moveBefore(earliestUser);
+    }
+  }
+
+  return success();
+}
+
 /// Finds all defining operations of a given type `Op` that transitively define
 /// the input `val`. If an intermediate value is defined by an operation of a
 /// different type, the function traverses further until it either finds a
@@ -839,6 +889,13 @@ public:
         createNewSharedEncoding(cast<RankedTensorType>(localLoad.getType()));
     for (auto memVal : pattern.sharedMemVals)
       changeSharedEncoding(rewriter, memVal, newSharedEncoding);
+    for (auto memOp : pattern.localAllocStores) {
+      if (!llvm::succeeded(
+              moveAllTransitiveDefiningOpsToEarliestUser<tt::LoadOp>(
+                  memOp->getResult(0)))) {
+        LDBG("Failed to move dequantization");
+      };
+    }
     return success();
   }
 };
