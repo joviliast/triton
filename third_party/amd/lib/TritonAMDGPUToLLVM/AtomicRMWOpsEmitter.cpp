@@ -78,18 +78,32 @@ Value genI32TiledOp(RewriterBase &rewriter, Generator genCall, Value argToSplit,
   Type ty = argToSplit.getType();
   size_t tySize = ty.getIntOrFloatBitWidth();
   size_t i32Size = i32_ty.getIntOrFloatBitWidth();
-  size_t count = tySize / i32Size;
-  assert(tySize % i32Size == 0 && count > 0 &&
-         "Unalligned types are not supported yet.");
-  Type i32VecValTy = vec_ty(i32_ty, count);
-  Value vec = b.undef(i32VecValTy);
-  Value valCasted = b.bitcast(argToSplit, i32VecValTy);
+  size_t count = ceil<size_t>(tySize, i32Size);
+  size_t totalSize = count * i32Size;
+
+  Value asInt = b.bitcast(argToSplit, int_ty(tySize));
+
+  // padding
+  if (i32Size > tySize) {
+    asInt = b.zext(int_ty(totalSize), asInt);
+  }
+
+  Type i32VecTy = vec_ty(i32_ty, count);
+  Value valCasted = b.bitcast(asInt, i32VecTy);
+  Value resultVec = b.undef(i32VecTy);
   for (int i = 0; i < count; i++) {
     Value subVal = b.extract_element(i32_ty, valCasted, b.i32_val(i));
     Value result = genCall(rewriter, subVal, args...);
-    vec = b.insert_element(i32VecValTy, vec, result, b.i32_val(i));
+    resultVec = b.insert_element(i32VecTy, resultVec, result, b.i32_val(i));
   }
-  return b.bitcast(vec, ty);
+
+  // Bitcast back to original type
+  Value finalInt = b.bitcast(resultVec, int_ty(totalSize));
+  if (i32Size > tySize) {
+    finalInt = b.trunc(int_ty(tySize), finalInt);
+  }
+
+  return b.bitcast(finalInt, ty);
 }
 
 Value genPrefixSum(RewriterBase &rewriter, Value v0) {
@@ -364,7 +378,9 @@ Value AtomicRMWEmitter::atomicIntraWaveReduce(RewriterBase &rewriter,
   Value rightNeighbourAddr = genI32TiledOp(rewriter, generateI32DppMove, rmwPtr,
                                            0x130, 0xF, 0xF, false);
   Value elemSize = b.i64_val(operandElemType.getIntOrFloatBitWidth() / 8);
-  Value isNeighbour = b.icmp_eq(rightNeighbourAddr, b.add(rmwPtr, elemSize));
+  Value isNeighbour =
+      b.or_(b.icmp_eq(rightNeighbourAddr, b.add(rmwPtr, elemSize)),
+            b.icmp_eq(rightNeighbourAddr, b.sub(rmwPtr, elemSize)));
   Value neighbourFlag = targetInfo.ballot(rewriter, loc, i64_ty, isNeighbour);
   Value numNeighbours =
       b.trunc(i32_ty, generatePopcount64(rewriter, neighbourFlag));

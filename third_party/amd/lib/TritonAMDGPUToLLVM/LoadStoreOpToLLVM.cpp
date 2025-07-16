@@ -1472,15 +1472,19 @@ struct AtomicRMWOpConversion
     bool enableIntraWaveReduce =
         llvm::is_contained({ISAFamily::CDNA3, ISAFamily::CDNA4},
                            targetInfo.getISAFamily()) &&
-        tensorTy && opResult.use_empty();
-
-    // TODO: support data types less than 32 bits
-    enableIntraWaveReduce &= valueElemTy.getIntOrFloatBitWidth() >= 32;
+        tensorTy && opResult.use_empty() && op.getSem() == MemSemantic::RELAXED;
 
     if (tensorTy) {
       bool isF16Ty = valueElemTy.isF16() || valueElemTy.isBF16();
       unsigned availableVecSize = isF16Ty ? 2 : 1;
       vec = std::min<unsigned>(vec, availableVecSize);
+
+      auto threadOrder = getThreadOrder(tensorTy);
+      unsigned contigWithinLanes =
+          axisAnalysisPass.getAxisInfo(ptr)->getContiguity(threadOrder.front());
+      // Need to clarify vector condition
+      enableIntraWaveReduce &= contigWithinLanes == 1 && vec == 1;
+
       // Force F16 packing in the case it's not coming in as packed, but the
       // ISA can support packed atomic instructions.
       applyPackingF16 =
@@ -1488,11 +1492,6 @@ struct AtomicRMWOpConversion
           vec == 1 && isF16Ty && atomicRmwAttr == RMWOp::FADD &&
           !enableIntraWaveReduce;
       numElems = tensorTy.getNumElements();
-
-      auto threadOrder = getThreadOrder(tensorTy);
-      unsigned contigWithinLanes =
-          axisAnalysisPass.getAxisInfo(ptr)->getContiguity(threadOrder.front());
-      enableIntraWaveReduce &= contigWithinLanes == 1;
     }
 
     auto vecTy = vec_ty(valueElemTy, vec);
