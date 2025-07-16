@@ -1777,7 +1777,7 @@ def test_tensor_atomic_add_shift_1(size, num_ctas, dtype_x_str, device):
 @pytest.mark.interpreter
 @pytest.mark.parametrize("shape, idx_order, mask_step, num_ctas, dtype_x_str",
                          [(shape, idx_order, mask_step, num_ctas, dtype_x_str)
-                          for shape in [(2, 2), (4, 4), (5, 5), (6, 6), (8, 8)]
+                          for shape in [(2, 2), (4, 4), (5, 5), (6, 6), (8, 8), (16, 16)]
                           for idx_order in ['increase', 'decrease', 'random_no_duplication', 'random']
                           for mask_step in range(1, 5)
                           for num_ctas in num_ctas_list
