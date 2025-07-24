@@ -1221,6 +1221,10 @@ public:
     SmallVector<unsigned, 2> wmmaWarpsPerCTA(rank, 1);
     wmmaWarpsPerCTA[aScale ? 0 : 1] = numWarps;
 
+    if (wmmaVersion == 1)
+      return rewriter.notifyMatchFailure(
+          dotOp, "Transposed WMMA layout is not supported for gfx11");
+
     // Always use transposed wmma layout. This enables larger vectorization
     // for global store instructions.
     auto wmmaEnc = ttg::AMDWmmaEncodingAttr::get(ctx, /*version=*/wmmaVersion,

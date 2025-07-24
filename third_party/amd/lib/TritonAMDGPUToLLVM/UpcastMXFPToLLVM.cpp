@@ -262,7 +262,7 @@ public:
     LDBG("scale: " << scaleVals.size() << " x " << scaleVals.front().getType());
 
     // When we lower scaled dot op, we made sure to distribute K only on one
-    // warp. MXFP spec mandates 1 scale value for every 32 onsecutive values
+    // warp. MXFP spec mandates 1 scale value for every 32 consecutive values
     // along the K dimension. So in total each thread should read 32x main
     // element values.
     if (xVals.size() != scaleVals.size() * (isPacked ? 16 : 32))
@@ -290,6 +290,8 @@ public:
       return rewriter.notifyMatchFailure(op, "NYI: non-mfma32/16 intrinsics");
 
     int numThreads = lookupThreadsPerWarp(rewriter);
+    int numKThreads = numThreads / mDim;
+
     auto [laneId, warpId] = getLaneAndWarpId(rewriter, loc);
 
     bool useFp16 = op.getType().getElementType().isF16();
@@ -305,7 +307,7 @@ public:
     Value offset =
         b.mul(b.urem(laneId, b.i32_val(mDim)), b.i32_val(numThreads / mDim));
 
-    if (mDim == 32) {
+    if (numKThreads == 2) {
       // One mfma32 intrinsic processes a 32x8 A tensor slice. Due to how we
       // tile, the same warp owns the whole K dim. Inside a warp, each thread
       // only holds 4 consecutive elements along K--a 1x4 vector. We need to
@@ -330,7 +332,7 @@ public:
                                             si[j / 16], op.getFastMath());
         }
       }
-    } else if (mDim == 16 && isCDNA) {
+    } else if (numKThreads == 4) {
       // One mfma16 intrinsic processes a 16x16 A tensor slice. Similarly, we
       // need to tile the warp 2 times to cover 32 values. So for a thread, the
       // first 2 1x4 vectors shares the first scale value at row (tid % mDim).
@@ -356,24 +358,8 @@ public:
         }
       }
     } else {
-      assert(mDim == 16 && isRDNA);
-      // RDNA case
-      std::array<Value, 2> scaleThreads = {offset, b.add(offset, b.i32_val(1))};
-
-      for (auto [i, scaleVal] : llvm::enumerate(scaleVals)) {
-        auto si = std::array<Value, 2>{
-            targetInfo.shuffleIdx(rewriter, loc, scaleVal, scaleThreads[0]),
-            targetInfo.shuffleIdx(rewriter, loc, scaleVal, scaleThreads[1])};
-
-        for (int j = 0; j < 32; ++j) {
-          int index = 32 * i + j;
-          xVals[index] =
-              useFp16 ? mxfpScaleFp16(rewriter, loc, xVals[index], si[j / 16],
-                                      op.getFastMath())
-                      : mxfpScaleBf16ViaF32(rewriter, loc, xVals[index],
-                                            si[j / 16], op.getFastMath());
-        }
-      }
+      return rewriter.notifyMatchFailure(op,
+                                         "NYI: Not supported number of tiles");
     }
 
     Value result =
