@@ -237,14 +237,14 @@ def _fresh_knobs_impl(skipped_attr: Optional[Set[str]] = None):
         return knobs
 
     def reset_function():
-        for name, knobset in knobs_map.items():
-            setattr(knobs, name, knobset)
         # `undo` should be placed before `del os.environ`
         # Otherwise, it may restore environment variables that monkeypatch deleted
         monkeypatch.undo()
         for k in env_to_unset:
             if k in os.environ:
                 del os.environ[k]
+        for name, knobset in knobs_map.items():
+            setattr(knobs, name, knobset.reset())
         knobs.propagate_env = prev_propagate_env
 
     return fresh_function, reset_function
